@@ -18,37 +18,22 @@ The model is written as a square **mixed complementarity problem (MCP)** in
 
 ## Current status (2026-09-03)
 
-Please read this before trusting any number the model produces.
-
 - The default synthetic economy prepares, balances and builds correctly:
   216-account SAM, 48,099 variables = 48,099 complementarity constraints.
-- **The benchmark solve does not currently converge.** A correctly
-  calibrated benchmark is an equilibrium by construction (all equation
-  residuals ≈ 0 at the start values). Here PATH starts from a residual of
-  ≈6.1e3, stops at its iteration limit and reports
-  `termination_status = ITERATION_LIMIT`, `primal_status = UNKNOWN_RESULT_STATUS`.
-  Until this is fixed, shocks, dynamic runs and policy experiments run
-  mechanically but their results are not meaningful.
-- What has been fixed (2026-09-03): bilateral-trade start values are now
-  derived from the aggregate imports/exports and the share parameters
-  (`T-5…T-27` residuals ≈ 0), domestic-supply/export split uses the calibrated
-  shares (`T-14`), land supply (`F-13`), the `beta_z` normalisation (`T-19`)
-  and a double-applied share in `M_GOVDEM`/`M_INVDEM`.
-- What remains (largest start residuals first, see `diagnose_model`):
-  household Armington/bundle shares `GammaC`, `alpha_dc/mc/df/mf` are uniform
-  defaults, not calibrated from the SAM (`D-5`, `D-10…D-13`); per-vintage
-  production-nest start values use hard-coded fractions instead of the
-  calibrated `alpha_*` (`P_*`, e.g. `P_67`); government revenue `C-3` cannot
-  match because `tau_l/t/k/Ac/Af`, `kappa_h`, `pi` default to 0 while `YG` is
-  calibrated as total SAM tax revenue; and the CET aggregator `T-16` is
-  inconsistent with the value-share calibration of `beta_xd/beta_es`
-  (needs a different CET parameterisation). These need modelling decisions,
-  not just code fixes.
-- Always check `termination_status(m)` after `solve_model!` — a run that
-  "completes" is not the same as one that converged. `diagnose_model(m)`
-  now reports each equation's residual at the start point
-  (`residual_at_start`), which is the right metric to watch while fixing the
-  calibration.
+- **The benchmark replicates**: every equation holds at the calibrated start
+  values (max residual 9e-6), PATH reports `LOCALLY_SOLVED` after one major
+  iteration (≈4 s) and all variables stay within 3e-4 % of their start
+  values.
+- A 20 % import tariff on one bilateral flow (`examples` / README below)
+  solves in ≈1 s with textbook incidence: the taxed import flow falls 1.9 %,
+  its tariff-inclusive price rises 3.8 %, the exporter's FOB price falls
+  3.7 %, competing sources are barely affected, real GDP falls by 1e-4 %.
+- Recursive dynamics and the policy-experiment runner run mechanically; see
+  "Known limitations" for the state of the capital-accumulation update.
+- Always check `termination_status(m)` after `solve_model!`. Now that the
+  benchmark converges, an `ITERATION_LIMIT` after a shock means the shock is
+  too large for a single step — apply it in smaller increments, re-solving
+  from the previous solution.
 
 ---
 
@@ -92,8 +77,8 @@ using JuMP
 data = init_data()        # empty data container
 prepare_data!(data)       # built-in synthetic 100-sector SAM → balance → calibrate
 m = model(data)           # build the JuMP/PATH model (~15 s)
-solve_model!(m)           # solve with PATH (~75 s)
-termination_status(m)     # check this! see "Current status"
+solve_model!(m)           # solve with PATH (~4 s at the benchmark)
+termination_status(m)     # LOCALLY_SOLVED
 export_results!(m, data)  # write results/*.csv
 ```
 
@@ -104,7 +89,7 @@ m, data = run_linkage!(write_results=true)
 ```
 
 Rough timings on a laptop: `include` 7 s, `prepare_data!` 6 s, `model` 14 s,
-`solve_model!` ≈ 75 s.
+`solve_model!` 1–4 s.
 
 ---
 
@@ -123,7 +108,7 @@ Rough timings on a laptop: `include` 7 s, `prepare_data!` 6 s, `model` 14 s,
 
 In Julia, `results_dataframe(m)` returns the same table as
 `results_all_variables.csv`. `pct_change_from_start` is the change relative
-to the calibrated start value.
+to the calibrated benchmark (≈ 0 for a benchmark run).
 
 ---
 
@@ -147,7 +132,9 @@ m = model(data)
 
 `examples/02_read_csv_sam.jl` and `03_read_excel_sam.jl` show the explicit
 step-by-step version (`read_sam_csv!` → `validate_sam!` → `balance_sam_ras!`
-→ `calibrate_from_sam!`).
+→ `calibrate_from_sam!`). Read "Calibration conventions" below before using
+a real SAM: the model cannot represent a trade deficit, and the calibration
+adjusts final demand to close it.
 
 ---
 
@@ -173,7 +160,7 @@ Commonly used entries:
 | `:tau_p` | Output tax rate | `product` |
 | `:AT` | Total factor productivity | `product` |
 | `:LSupply` | Labour supply | `"UnSkLab"` or `"SkLab"` |
-| `:KSupply` | Capital supply | `(product, vintage)` |
+| `:KSupply` | Capital supply (rental units) | `(product, vintage)` |
 
 ---
 
@@ -203,8 +190,8 @@ dynamic/policy pipeline; see `examples/README.md` for the list and runtimes.
 
 ```bash
 julia examples/04_build_model.jl          # build only, prints variable/constraint counts
-julia --project=. test/runtests.jl        # smoke test: SAM, CSV import, build, results labels (~1 min)
-LCGE_TEST_SOLVE=true julia --project=. test/runtests.jl   # additionally solve (currently fails, see status)
+julia --project=. test/runtests.jl        # smoke test: SAM, CSV import, build, results labels (~30 s)
+LCGE_TEST_SOLVE=true julia --project=. test/runtests.jl   # additionally solves the benchmark (LOCALLY_SOLVED)
 ```
 
 ---
@@ -213,17 +200,68 @@ LCGE_TEST_SOLVE=true julia --project=. test/runtests.jl   # additionally solve (
 
 ```julia
 print_model_diagnostics(m)   # variable/constraint counts and solver
-diagnose_model(m)            # equation ↔ variable matching report in results/diagnostics/
+diagnose_model(m)            # equation ↔ variable matching and residual_at_start per equation
 ```
+
+`diagnose_model` writes `results/diagnostics/*.csv`; the `residual_at_start`
+column of the equation table is the quantity to watch when changing
+calibration or initialisation — it must be ≈ 0 for every equation at the
+benchmark.
+
+---
+
+## Calibration conventions
+
+`calibrate_from_sam!` (src/Calibration.jl) derives every share parameter and
+the complete benchmark start point (`parameters(data)[:bench]`) from the
+balanced SAM, so that each equation holds exactly at the start values. The
+conventions, and the three places where the SAM cannot supply what the
+equations need, are documented in the header of `Calibration.jl`:
+
+- Benchmark prices are 1 (net-of-tax producer price `PX = 1/(1+tau_p)`);
+  CES shares `α_j = s_j (P/P_j)^(1−σ)`, CET shares `β_j = s_j (P/P_j)^(1+σ)`
+  from SAM value shares; all elasticities default to 0.5 (no elasticity data
+  in the SAM); technical-change indices `λ = 1`.
+- **Balanced trade.** The trade block (E-2 with T-21) makes the CIF value of
+  imports of each good identically equal its FOB export value, and there is no
+  balance-of-payments equation, so a trade deficit cannot be represented. The
+  synthetic SAM has a 7,439 deficit at border prices. Exports are kept at
+  their SAM values, imports are set to `(1+tau_m)(1+tau_e)` × exports, and
+  household, government and investment demand are scaled down (≈12 %) so that
+  absorption equals output minus exports plus imports. Intermediate demand,
+  production and factor payments keep their SAM values. Consequently the
+  direct-tax rate is solved so that investment is financed (`kappa_h ≈ 0.24`),
+  household saving is ≈ 0 and government saving funds investment.
+- **Land is agricultural only** (the factor equations force zero land outside
+  `S[:ag]`); land payments the synthetic SAM assigns to other sectors are
+  reassigned to capital.
+- **Subsistence quantities `theta = 0`** (LES collapses to proportional
+  budget shares); trade margins are zero at the benchmark (`zeta_t = 0`).
+
+---
+
+## Known limitations
+
+- **Labour closure.** F-4, F-6 and F-11 are circular, so the nominal net-wage
+  level (`AVGW`, `TW`, `NW`) is pinned only by a numerical guard; the real
+  cost side is anchored by `W = 1` (F-12). Replacing F-6 by a wage curve or
+  market-clearing condition is a modelling change that has not been made.
+- **Recursive dynamics.** `update_period_data!` treats the benchmark capital
+  supply (a rental payment) as a stock and adds investment (a commodity flow)
+  to it, so the capital stock roughly doubles per period and PATH fails from
+  period 3. Being fixed; check `termination_status` per period in
+  `results/dynamic/time_series.csv`.
+- Zero-valued variables sit at a 1e-8 safety bound, which leaves residual
+  floors of ~1e-8 on ~180 equation families; harmless for PATH.
 
 ---
 
 ## Troubleshooting
 
-**`termination_status(m)` is `ITERATION_LIMIT`, not `LOCALLY_SOLVED`** —
-see "Current status". This is the state of the shipped benchmark; a
-`pct_change_from_start` far from zero is a symptom of the failed solve, not an
-economic result.
+**`termination_status(m)` is `ITERATION_LIMIT` after a shock** — the shock is
+too large for one Newton path from the benchmark. Apply it in steps (e.g.
+tariff 0.11 → 0.15 → 0.20), re-solving each time; the previous solution is
+kept as the start point when you modify `PAR` and rebuild.
 
 **PATH licence error** — set `PATH_LICENSE_STRING` before starting Julia
 (see [PATHSolver.jl](https://github.com/chkwon/PATHSolver.jl)); by default the
@@ -246,10 +284,10 @@ SDCGE/  (branch main)
 │   ├── LinkageModel.jl     module entry point; include order and exports
 │   ├── Types.jl            LinkageData container, default_sets!
 │   ├── SAM.jl              SAM accounts, synthetic SAM, CSV/Excel readers, RAS balancing
-│   ├── Calibration.jl      calibrate_from_sam!
-│   ├── ParameterTables.jl  precompute_parameters → PAR dictionary
+│   ├── Calibration.jl      calibrate_from_sam!: shares and benchmark start point from the SAM
+│   ├── ParameterTables.jl  precompute_parameters → PAR dictionary (defaults + calibrated tables)
 │   ├── Functions.jl        CES / CET / Armington helper functions
-│   ├── Initialization.jl   start values and bounds for all variables
+│   ├── Initialization.jl   start values and bounds for all variables (from PAR[:bench])
 │   ├── Variables.jl        @variables declarations
 │   ├── Production.jl, Income.jl, Demand.jl, Trade.jl, Equilibrium.jl,
 │   │   Closure.jl, Factors.jl, Other.jl   paper-numbered equation blocks (P-, Y-, D-, T-, E-, C-, F-)

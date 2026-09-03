@@ -96,13 +96,16 @@ function precompute_parameters(data::LinkageData)
         _fill!(PAR,key,i, key in [:pi,:tau_p,:tau_y,:tau_f] ? 0.0 : 1.0)
     end
     _fill!(PAR,:mu,h,0.25)
-    _fill!(PAR,:theta,[(kk,hh) for kk in k for hh in h],0.1)
+    # ELES subsistence quantities: 0 unless calibration supplies better information.
+    _fill!(PAR,:theta,[(kk,hh) for kk in k for hh in h],0.0)
     _fill!(PAR,:lambda_w,[(rr,rrp,ii) for rr in r for rrp in rp for ii in i],1.0)
     _fill!(PAR,:wtr,[(rr,ii,inn) for rr in r for ii in i for inn in ins],0.0)
     _fill!(PAR,:trqrent,[(rr,rrp,ii) for rr in r for rrp in rp for ii in i],0.0)
     # common two/three-dimensional production parameters
+    # Efficiency / technical-change indices (lambda_*) are 1 in the base year;
+    # anything else rescales the CES duals and breaks benchmark replication.
     for key in [:alpha_nd,:alpha_va,:sigma_p,:alpha_l,:alpha_hktef,:sigma_v,:alpha_fert,:alpha_hkte,:sigma_f,:alpha_e,:alpha_hkt,:sigma_e,:alpha_h,:alpha_kt,:sigma_h,:alpha_k,:alpha_t,:alpha_ff,:lambda_k,:lambda_t,:lambda_f,:sigma_k,:alpha_ktel,:alpha_tfd,:alpha_feed,:sigma_feed,:alpha_hkte_liv]
-        _fill!(PAR,key,[(ii,vv) for ii in i for vv in v], key == :sigma_p ? 0.5 : (startswith(String(key),"sigma") ? 0.5 : 0.5))
+        _fill!(PAR,key,[(ii,vv) for ii in i for vv in v], startswith(String(key),"lambda") ? 1.0 : 0.5)
     end
     for key in [:tau_Ap,:a_nd]
         _fill!(PAR,key,[(jj,ii) for jj in j for ii in i], key == :tau_Ap ? 0.0 : 0.1)
@@ -115,7 +118,7 @@ function precompute_parameters(data::LinkageData)
     _fill!(PAR, :sigma_ul, i, 0.5)
     _fill!(PAR, :sigma_sl, i, 0.5)
     for key in [:alpha_ft,:lambda_ft,:sigma_ft,:alpha_ep,:lambda_ep,:sigma_ep,:alpha_fd,:lambda_fd,:sigma_fd]
-        _fill!(PAR,key,[(jj,ii) for jj in i for ii in i], startswith(String(key),"sigma") ? 0.5 : 0.5)
+        _fill!(PAR,key,[(jj,ii) for jj in i for ii in i], startswith(String(key),"lambda") ? 1.0 : 0.5)
     end
     for key in [:alpha_xd,:alpha_xm,:sigma_m,:alpha_w,:sigma_w,:alpha_eout,:alpha_dout,:sigma_x,:tau_m,:tau_e,:tmarg,:gamma,:rho,:kappa,:phi,:omega]
         _fill!(PAR,key,[(rr,rrp,ii) for rr in r for rrp in rp for ii in i], startswith(String(key),"tau") ? 0.0 : 0.5)

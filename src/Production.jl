@@ -10,6 +10,16 @@ function add_production_equations!(model, data::LinkageData, PAR)
     ULD=model[:ULD]; SLD=model[:SLD]; HKTEF=model[:HKTEF]; PHKTEF=model[:PHKTEF]; fert=model[:fert]; Pfert=model[:Pfert]; HKTE=model[:HKTE]; PHKTE=model[:PHKTE]; XEp=model[:XEp]; PEp=model[:PEp]; HKT=model[:HKT]; PHKT=model[:PHKT]; KT=model[:KT]; PKT=model[:PKT]; Kvd=model[:Kvd]; Td=model[:Td]; Fd=model[:Fd]
     XAp=model[:XAp]; PA=model[:PA]; PAp=model[:PAp]; Pfeed=model[:Pfeed]; feed=model[:feed]; KTEL=model[:KTEL]; PKTEL=model[:PKTEL]; TFD=model[:TFD]; PTFD=model[:PTFD]; W=model[:W]; UW=model[:UW]; SW=model[:SW]; LV=model[:LV]; LF_d=model[:LF_d]; KF_d=model[:KF_d]; PT=model[:PT]; PF=model[:PF]; R=model[:R]
 
+    # Index sets of the ND (fixed-coefficient intermediate) bundle.  Energy is
+    # bought through the CES energy nest (P-27/P-51/P-67), fertiliser through
+    # P-25 (crops) and feed through P-49 (livestock), so those goods are NOT in
+    # the ND bundle.  The quantity equations already used these sets; the price
+    # indices P-30/P-54/P-70 summed over the wider sets, which made PND differ
+    # from the true unit cost of the bundle and left a residual in P-3/P-1.
+    cr_nd = [x for x in nnft if !(x in e)]
+    lv_nd = [x for x in nnfd if !(x in e)]
+    ip_nd = [x for x in i    if !(x in e)]
+
     # (P-1) Aggregate intermediate demand by vintage top nest
     @constraint(model, P_1[ii in i], (ND[ii]) - (PAR[:AT][ii] * sum(PAR[:alpha_nd][(ii,vv)] * XPv[ii,vv] * (UVCv[ii,vv] / PND[ii])^(PAR[:sigma_p][(ii,vv)]) for vv in v)) ⟂ ND[ii])
     # (P-2) Value added demand by vintage top nest
@@ -50,8 +60,8 @@ function add_production_equations!(model, data::LinkageData, PAR)
     @constraint(model, P_28[ii in cr, vv in v], (PEp[ii,vv]) - ((sum(PAR[:alpha_ep][(jj,ii)]*((1+PAR[:tau_Ap][(jj,ii)])*PA[jj]/PAR[:lambda_ep][(jj,ii)])^(1-PAR[:sigma_ep][(jj,ii)]) for jj in e))^(1/(1-PAR[:sigma_ep][(first(e),ii)]))) ⟂ PEp[ii,vv])
     # P_29 restricted to nnft minus energy: energy inputs are handled by P_27 (CES).
     # Including energy here would give XAp[e,cr] two equations.
-    @constraint(model, P_29[jj in [x for x in nnft if !(x in e)], ii in cr], (XAp[jj,ii]) - (PAR[:a_nd][(jj,ii)]*((PND[ii]/((1+PAR[:tau_Ap][(jj,ii)])*PA[jj]))^0.0)*ND[ii]) ⟂ XAp[jj,ii])
-    @constraint(model, P_30[ii in cr], (PND[ii]) - (sum(PAR[:a_nd][(jj,ii)]*(1+PAR[:tau_Ap][(jj,ii)])*PA[jj] for jj in nnft)) ⟂ PND[ii])
+    @constraint(model, P_29[jj in cr_nd, ii in cr], (XAp[jj,ii]) - (PAR[:a_nd][(jj,ii)]*((PND[ii]/((1+PAR[:tau_Ap][(jj,ii)])*PA[jj]))^0.0)*ND[ii]) ⟂ XAp[jj,ii])
+    @constraint(model, P_30[ii in cr], (PND[ii]) - (sum(PAR[:a_nd][(jj,ii)]*(1+PAR[:tau_Ap][(jj,ii)])*PA[jj] for jj in cr_nd)) ⟂ PND[ii])
 
     # Livestock production P-31 to P-54
     @constraint(model, P_31[ii in lv, vv in v], (KTEL[ii,vv]) - (PAR[:alpha_ktel][(ii,vv)]*VA[ii,vv]) ⟂ KTEL[ii,vv])
@@ -77,8 +87,8 @@ function add_production_equations!(model, data::LinkageData, PAR)
     @constraint(model, P_51[jj in e, ii in lv], (XAp[jj,ii]) - (sum(PAR[:lambda_ep][(jj,ii)]^(PAR[:sigma_ep][(jj,ii)]-1)*PAR[:alpha_ep][(jj,ii)]*(PEp[ii,vv]/((1+PAR[:tau_Ap][(jj,ii)])*PA[jj]))^(PAR[:sigma_ep][(jj,ii)])*XEp[ii,vv] for vv in v)) ⟂ XAp[jj,ii])
     @constraint(model, P_52[ii in lv, vv in v], (PEp[ii,vv]) - ((sum(PAR[:alpha_ep][(jj,ii)]*((1+PAR[:tau_Ap][(jj,ii)])*PA[jj]/PAR[:lambda_ep][(jj,ii)])^(1-PAR[:sigma_ep][(jj,ii)]) for jj in e))^(1/(1-PAR[:sigma_ep][(first(e),ii)]))) ⟂ PEp[ii,vv])
     # P_53 restricted to nnfd minus energy: energy inputs handled by P_51 (CES).
-    @constraint(model, P_53[jj in [x for x in nnfd if !(x in e)], ii in lv], (XAp[jj,ii]) - (PAR[:a_nd][(jj,ii)]*ND[ii]) ⟂ XAp[jj,ii])
-    @constraint(model, P_54[ii in lv], (PND[ii]) - (sum(PAR[:a_nd][(jj,ii)]*(1+PAR[:tau_Ap][(jj,ii)])*PA[jj] for jj in nnfd)) ⟂ PND[ii])
+    @constraint(model, P_53[jj in lv_nd, ii in lv], (XAp[jj,ii]) - (PAR[:a_nd][(jj,ii)]*ND[ii]) ⟂ XAp[jj,ii])
+    @constraint(model, P_54[ii in lv], (PND[ii]) - (sum(PAR[:a_nd][(jj,ii)]*(1+PAR[:tau_Ap][(jj,ii)])*PA[jj] for jj in lv_nd)) ⟂ PND[ii])
 
     # Non-agricultural production P-55 to P-80
     @constraint(model, P_55[ii in ip], (ULD[ii]) - (sum(PAR[:alpha_l][(ii,vv)]*(PVA[ii,vv]/UW[ii])^(PAR[:sigma_v][(ii,vv)])*VA[ii,vv] for vv in v)) ⟂ ULD[ii])
@@ -96,8 +106,8 @@ function add_production_equations!(model, data::LinkageData, PAR)
     @constraint(model, P_67[jj in e, ii in ip], (XAp[jj,ii]) - (sum(PAR[:lambda_ep][(jj,ii)]^(PAR[:sigma_ep][(jj,ii)]-1)*PAR[:alpha_ep][(jj,ii)]*(PEp[ii,vv]/((1+PAR[:tau_Ap][(jj,ii)])*PA[jj]))^(PAR[:sigma_ep][(jj,ii)])*XEp[ii,vv] for vv in v)) ⟂ XAp[jj,ii])
     @constraint(model, P_68[ii in ip, vv in v], (PEp[ii,vv]) - ((sum(PAR[:alpha_ep][(jj,ii)]*((1+PAR[:tau_Ap][(jj,ii)])*PA[jj]/PAR[:lambda_ep][(jj,ii)])^(1-PAR[:sigma_ep][(jj,ii)]) for jj in e))^(1/(1-PAR[:sigma_ep][(first(e),ii)]))) ⟂ PEp[ii,vv])
     # P_69 restricted to non-energy goods: energy inputs handled by P_67 (CES).
-    @constraint(model, P_69[jj in [x for x in i if !(x in e)], ii in ip], (XAp[jj,ii]) - (PAR[:a_nd][(jj,ii)]*ND[ii]) ⟂ XAp[jj,ii])
-    @constraint(model, P_70[ii in ip], (PND[ii]) - (sum(PAR[:a_nd][(jj,ii)]*(1+PAR[:tau_Ap][(jj,ii)])*PA[jj] for jj in i)) ⟂ PND[ii])
+    @constraint(model, P_69[jj in ip_nd, ii in ip], (XAp[jj,ii]) - (PAR[:a_nd][(jj,ii)]*ND[ii]) ⟂ XAp[jj,ii])
+    @constraint(model, P_70[ii in ip], (PND[ii]) - (sum(PAR[:a_nd][(jj,ii)]*(1+PAR[:tau_Ap][(jj,ii)])*PA[jj] for jj in ip_nd)) ⟂ PND[ii])
     # Labor-demand disaggregation P-72 to P-75.
     # These equations decompose the aggregate unskilled/skilled labor bundles into skill-specific labor demand LV.
     # λ_l captures labor-augmenting technical change; σ_ul and σ_sl govern within-bundle substitution.

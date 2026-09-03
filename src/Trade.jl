@@ -52,9 +52,15 @@ function add_trade_equations!(model, data::LinkageData, PAR)
     @constraint(model, T_6[ii in i],
         (PMT[ii]) - ((sum(PAR[:beta_1][(rr,ii)] * PM1[rr,ii]^(1-PAR[:sigma_w1][ii]) for rr in r))^(1/(1-PAR[:sigma_w1][ii]))) ⟂ PMT[ii])
 
-    # (T-7) Second-tier composite import demand XM2.
-    @constraint(model, T_7[rr in r, ii in i],
-        (XM2[rr,ii]) - (PAR[:beta_2][(rr,ii)] * (PM1[rr,ii] / PM2[rr,ii])^PAR[:sigma_w2][(rr,ii)] * XM1[rr,ii]) ⟂ XM2[rr,ii])
+    # (T-7) Second-tier composite import demand XM2 (index fix).
+    # T-8 makes PM1[rr] the CES dual of the whole PM2[rrp] vector, so the
+    # matching quantity equation must aggregate the demand for source bundle
+    # rrp over every first-tier bundle rr.  Written as XM2[rr] = beta_2[rr]·XM1[rr]
+    # (one term, same index) the nest lost a factor |r|: with sum_rrp beta_2 = 1
+    # required by T-8, the second tier delivered only XMT/|r| to the bilateral
+    # tier, so sum_{r,rp} WTFd could never equal XMT.
+    @constraint(model, T_7[rrp in rp, ii in i],
+        (XM2[rrp,ii]) - (sum(PAR[:beta_2][(rrp,ii)] * (PM1[rr,ii] / PM2[rrp,ii])^PAR[:sigma_w2][(rr,ii)] * XM1[rr,ii] for rr in r)) ⟂ XM2[rrp,ii])
 
     # (T-8) Top-tier composite import price PM1.
     @constraint(model, T_8[rr in r, ii in i],
@@ -95,19 +101,33 @@ function add_trade_equations!(model, data::LinkageData, PAR)
         (ES[ii]) - (PAR[:beta_es][ii] * (PET[ii] / PP[ii])^PAR[:sigma_z][ii] * (XP[ii] - XMgr[ii])) ⟂ ES[ii])
 
     # (T-16) CET primal aggregation: gross output = CET(domestic + export).
+    # Convention fix: T-14/T-15 use the value-share form X_k = beta_k (P_k/P)^sigma X
+    # with sum_k beta_k = 1.  For an aggregator X = [sum_k b_k X_k^rho]^(1/rho),
+    # rho = (1+sigma)/sigma, revenue maximisation gives X_k = b_k^(-sigma)(P_k/P)^sigma X,
+    # so b_k = beta_k^(-1/sigma); the previous b_k = beta_k only reproduced
+    # X = sum_k X_k when sum_k beta_k^(1+rho) = 1, which value shares never satisfy.
     @constraint(model, T_16[ii in i],
         (XP[ii] - XMgr[ii]) -
-        ((PAR[:beta_xd][ii]*XDs[ii]^((1+PAR[:sigma_z][ii])/PAR[:sigma_z][ii]) +
-          PAR[:beta_es][ii]*ES[ii]^((1+PAR[:sigma_z][ii])/PAR[:sigma_z][ii]))^(PAR[:sigma_z][ii]/(1+PAR[:sigma_z][ii]))) ⟂ XP[ii])
+        ((PAR[:beta_xd][ii]^(-1/PAR[:sigma_z][ii])*XDs[ii]^((1+PAR[:sigma_z][ii])/PAR[:sigma_z][ii]) +
+          PAR[:beta_es][ii]^(-1/PAR[:sigma_z][ii])*ES[ii]^((1+PAR[:sigma_z][ii])/PAR[:sigma_z][ii]))^(PAR[:sigma_z][ii]/(1+PAR[:sigma_z][ii]))) ⟂ XP[ii])
 
     # (T-17) REMOVED — the revenue identity PET·ES = Σ PE·WTFs is implied by
     # CET duality (T-18, T-19) and would duplicate PET's equation.
 
     # (T-18) Bilateral export supply allocation across destinations.
+    # Sign fix: this is the CET supply FOC belonging to the dual T-19,
+    # PET = (sum beta_z · PE^(1+sigma_z2))^(1/(1+sigma_z2)), whose FOC is
+    # WTFs = beta_z (PE/PET)^sigma_z2 ES — supply to a destination RISES with the
+    # price received there.  The ratio was written the other way up (the CES
+    # *demand* form), so an export price cut raised supply to that destination.
+    # That is invisible at the benchmark (PE = PET = 1) but makes the response to
+    # any trade shock perverse and non-monotone; PATH hit its iteration limit on
+    # a 20% tariff with the old form.  It also breaks the CET revenue identity
+    # sum_rp PE·WTFs = PET·ES away from the benchmark.
     @constraint(model, T_18[rr in r, rrp in rp, ii in i],
         (WTFs[rr,rrp,ii]) -
         (PAR[:beta_z][(rr,rrp,ii)] *
-         (PET[ii] / (PE[rr,rrp,ii] + PAR[:tau_trq_share][(rr,rrp,ii)]*TauPR[rr,rrp,ii]*WPM[rr,rrp,ii]))^PAR[:sigma_z2][ii] *
+         ((PE[rr,rrp,ii] + PAR[:tau_trq_share][(rr,rrp,ii)]*TauPR[rr,rrp,ii]*WPM[rr,rrp,ii]) / PET[ii])^PAR[:sigma_z2][ii] *
          ES[ii]) ⟂ WTFs[rr,rrp,ii])
 
     # (T-19) CET dual export price (de-indexed from r: PET is a single scalar per good).
