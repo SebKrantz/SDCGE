@@ -36,13 +36,18 @@ function _build_model_unchecked(data::EnvData, calib::EnvCalibration; backend=:j
 
     init_report = initialize ? apply_initial_values!(jm, data, calib) : Dict{String,Any}("applied"=>0,"explicit"=>0,"fallback"=>0)
     closure_report = apply_excel_closures!(jm, data)
+    # ENVISAGE's standard closure fixes more variables than the workbook's
+    # `closures` sheet lists; the defaults are applied afterwards so a workbook
+    # rule always wins over the default.
+    default_closure_report = apply_default_closures!(jm, data)
 
     res=Dict{String,Function}()
     production_residuals!(res); supply_residuals!(res); income_residuals!(res); demand_residuals!(res)
     trade_residuals!(res); markets_residuals!(res); factors_residuals!(res); closure_residuals!(res)
     emissions_residuals!(res); dynamics_residuals!(res)
 
-    em = EnvModel(data,calib,jm,equation_registry(),res,Dict{String,Any}("initial_values"=>init_report, "excel_closures"=>closure_report))
+    em = EnvModel(data,calib,jm,equation_registry(),res,Dict{String,Any}("initial_values"=>init_report, "excel_closures"=>closure_report,
+                                       "default_closures"=>default_closure_report))
     if audit_mapping
         em.solution["path_mapping_report"] = path_mapping_report(em)
         # Mapping completeness is checked here.  Square status is handled by

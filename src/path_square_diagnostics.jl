@@ -381,7 +381,11 @@ function assert_path_square_preflight!(em::EnvModel; outdir=nothing, top::Int=50
     diag = outdir === nothing ? path_square_diagnostics(em; top=top) : write_path_square_report(em; outdir=outdir, top=top)
     em.solution["path_square_diagnostics"] = diag
 
-    total_square = Bool(get(diag, "square_using_total_variables", false))
+    # PATH needs one complementarity function per NON-FIXED variable: a variable
+    # that is fixed (lower bound = upper bound) is pinned by its bounds and needs
+    # no equation of its own.  The square test therefore compares equations with
+    # free variables, not with the total variable count.
+    total_square = Bool(get(diag, "square_using_free_variables", false))
     mapping_bad = !isempty(get(diag, "mapped_but_undeclared", Any[])) || !isempty(get(diag, "closure_not_declared", Any[]))
 
     if mapping_bad || !total_square
@@ -390,7 +394,8 @@ function assert_path_square_preflight!(em::EnvModel; outdir=nothing, top::Int=50
         preview = isempty(suspects) ? "none" : join([string(get(s, "variable_family", "")) for s in _ps_head(suspects, 12)], ", ")
         error("PATH preflight failed: model is not square or has invalid closure/mapping variables. " *
               "Variables=$(diag["variable_count_total"]), non-bound equations=$(diag["constraint_count_excluding_bounds"]), " *
-              "gap=$(diag["square_gap_total_variables"]). " *
+              "free variables=$(diag["variable_count_free"]), " *
+              "gap=$(diag["square_gap_free_variables"]). " *
               "Mapped-but-undeclared=$(diag["mapped_but_undeclared"]). " *
               "Closure-not-declared=$(diag["closure_not_declared"]). " *
               "Suspect families=$(preview). " * report_msg)
@@ -566,6 +571,7 @@ function path_square_block_diagnostics(data::EnvData, calib::EnvCalibration;
     if apply_closures
         _ps_block_step!(trace, jm, "apply_excel_closures!", () -> begin
             closure_report = apply_excel_closures!(jm, data)
+            apply_default_closures!(jm, data)
             nothing
         end; stop_on_error=stop_on_error, top=top)
     end

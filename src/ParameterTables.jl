@@ -585,8 +585,8 @@ function _production_scalar_groups(data::EnvData)
     out["crop_va"] = _component_share_by_activity(raw, s.acr, ["LAB1","VA1"]; allow_zero=true, group="crop_va")
     out["crop_va1"] = _component_share_by_activity(raw, s.acr, ["ND2","VA2"]; allow_zero=true, group="crop_va1")
     out["crop_va2"] = _component_share_by_activity(raw, s.acr, ["KEF","LAND"]; allow_zero=true, group="crop_va2")
-    out["def_va"] = _component_share_by_activity(raw, s.ax, ["LAB1","VA1"]; allow_zero=true, group="def_va")
-    out["def_va1"] = _component_share_by_activity(raw, s.ax, ["KEF","VA2"]; allow_zero=true, group="def_va1")
+    out["def_va"] = _component_share_by_activity(raw, default_activities(s), ["LAB1","VA1"]; allow_zero=true, group="def_va")
+    out["def_va1"] = _component_share_by_activity(raw, default_activities(s), ["KEF","VA2"]; allow_zero=true, group="def_va1")
     out["livestock_va"] = _component_share_by_activity(raw, s.alv, ["LAB1","VA1","VA2"]; allow_zero=true, group="livestock_va")
     out["livestock_va1"] = _component_share_by_activity(raw, s.alv, ["KEF","VA2"]; allow_zero=true, group="livestock_va1")
     out["livestock_va2"] = _component_share_by_activity(raw, s.alv, ["FEED","LAND"]; allow_zero=true, group="livestock_va2")
@@ -882,7 +882,7 @@ function precompute_parameters(data::EnvData, cal::EnvCalibration)
         if group in ["alpha_dt","alpha_mt","alpha_d","alpha_m","gamma_d","gamma_e"]
             PAR[sym] = _scalar_from_group(alpha, group, item)
         else
-            acts = occursin("crop", group) ? s.acr : occursin("livestock", group) ? s.alv : occursin("def_", group) ? s.ax : s.a
+            acts = occursin("crop", group) ? s.acr : occursin("livestock", group) ? s.alv : occursin("def_", group) ? default_activities(s) : s.a
             PAR[sym] = Dict(String(a) => _scalar_from_group(alpha, group, string(a,"|",item)) for a in acts)
         end
     end

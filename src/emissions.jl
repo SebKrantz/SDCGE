@@ -16,6 +16,23 @@ function _emission_aa_set(s::EnvSets)
     return unique(vcat(s.aa, s.a))
 end
 
+"""
+    _emi_slice_active(s, src, ag)
+
+Sparsity pattern of the ENVISAGE emissions variable `Emi[r,em,is,aa]`:
+`(i, aa) ∪ (f, a) ∪ ("tot", a)` — commodity-based emissions (E-1) exist for
+every Armington agent, while factor-based (E-2) and process-based (E-3)
+emissions exist only for activities.
+"""
+function _emi_slice_active(s::EnvSets, src::AbstractString, ag::AbstractString)
+    if src in s.i
+        return ag in s.aa
+    elseif src in s.fp || src == "tot"
+        return ag in s.a
+    end
+    return false
+end
+
 function _emission_coalitions(data::EnvData)
     # ENVISAGE uses index rq for emission coalitions.  If the aggregation has
     # not provided rq, the standard one-region-per-coalition case is used.
@@ -66,8 +83,14 @@ function emissions_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
     od = JuMP.object_dictionary(m)
 
     # Declare only ENVISAGE emissions variable families used in E-1:E-8.
+    # ENVISAGE E-1:E-3 populate three disjoint slices of Emi_{r,em,is,aa}
+    # (documentation pp. 66-67 and footnote 81): the commodity slice (is = i)
+    # spans all Armington agents aa, while the factor slice (is = f) and the
+    # process slice (is = "tot") exist only over activities.  Declaring the full
+    # rectangular cross product left the (f, fd) and ("tot", fd) cells with no
+    # determining equation, so the declaration follows the document's sparsity.
     if !haskey(od, :Emi)
-        @variable(m, Emi[s.r, s.em, is, aa] >= 0)
+        @variable(m, Emi[r=s.r, em=s.em, src=is, ag=aa; _emi_slice_active(s, src, ag)] >= 0)
     end
     if !haskey(od, :EmiTot)
         @variable(m, EmiTot[s.r, s.em] >= 0)

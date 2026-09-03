@@ -31,6 +31,7 @@ function closure_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
     grKMin = PAR[:grKMin]
     grKTrend = PAR[:grKTrend]
     rbar = PAR[:r]
+    gamma_c = PAR[:gamma_c]     # LES subsistence minima, used by M-33 (EV)
     s = data.sets
     inv_fd = _env_pick(s.fd, vcat(s.inv, ["inv", "INV", "investment", "Investment"]), _env_first(s.fd, "inv"))
     cap = _env_first(s.cap, "cap")
@@ -133,6 +134,8 @@ function closure_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
     RSG_deflator = PGDPMP
     t0 = _env_first(s.t,"t")
     h0 = _env_pick(s.fd, s.h, _env_first(s.fd,"h"))
+    # ENVISAGE capital-account closure switch (see M-18/M-19/M-21 below).
+    inv_closure = lowercase(strip(String(get(data.par, "invClosure", "gtap"))))
 
     # (M-1) GDP at market price.
     @NLconstraint(m, [r=s.r], GDPMP[r] == QGDP[r,t0,t0])
@@ -234,17 +237,31 @@ function closure_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
     # (M-17) Net current rate of return.
     @NLconstraint(m, [r=s.r], Rc[r] == R[r] / PFD[r,inv_fd] - delta)
 
-    # (M-18) Expected rate of return, GTAP-style capital account closure.
-    @NLconstraint(m, [r=s.r], Re[r] == Rc[r] * (TKe[r] / (TKs[r] + 1.0e-9))^(-eps_ror))
-
-    # (M-19) Flexible foreign saving: expected regional return equals global return adjusted for risk premium.
-    @NLconstraint(m, [r=s.r], Re[r] == Rg + Rd[r])
+    # (M-18)/(M-19)/(M-21) are the three ALTERNATIVE ENVISAGE capital-account
+    # closures for the expected rate of return Re.  The document selects exactly
+    # one of them; this port previously declared all three, so 9 equations chased
+    # 3 variables.  `data.par["invClosure"]` selects the active one:
+    #   "gtap"    -> M-18, GTAP-style expected rate of return (default)
+    #   "flexSf"  -> M-19, flexible foreign saving (Re equalized up to a premium)
+    #   "usage"   -> M-21, USAGE-style closure
+    # Whichever branch is inactive contributes no equation, so Re is determined
+    # exactly once and Rd is exogenous outside the "flexSf" case.
+    if inv_closure == "gtap"
+        # (M-18) Expected rate of return, GTAP-style capital account closure.
+        @NLconstraint(m, [r=s.r], Re[r] == Rc[r] * (TKe[r] / (TKs[r] + 1.0e-9))^(-eps_ror))
+    elseif inv_closure == "flexsf"
+        # (M-19) Flexible foreign saving: expected regional return equals the
+        # global return adjusted for a regional risk premium.
+        @NLconstraint(m, [r=s.r], Re[r] == Rg + Rd[r])
+    elseif inv_closure == "usage"
+        # (M-21) Expected rate of return, USAGE-style closure.
+        @NLconstraint(m, [r=s.r], Re[r] == (1 / (1 + rbar)) * (R[r] / PFD[r,inv_fd] + (1 - delta)) - 1)
+    else
+        error("Unknown data.par[\"invClosure\"] = $(inv_closure). Use \"gtap\", \"flexSf\" or \"usage\".")
+    end
 
     # (M-20) Investment-savings balance is defined in the income block as Y-20.
     # This closure file does not duplicate Y-20.
-
-    # (M-21) Expected rate of return, USAGE-style closure.
-    @NLconstraint(m, [r=s.r], Re[r] == (1 / (1 + rbar)) * (R[r] / PFD[r,inv_fd] + (1 - delta)) - 1)
 
     # (M-22) Deviation of expected rate of return from trend.
     @NLconstraint(m, [r=s.r], DeltaRoR[r] == Re[r] - Rn - Rd[r] - Rg)
@@ -266,11 +283,29 @@ function closure_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
     # (M-26) Model numeraire.
     @NLconstraint(m, PNUM == 1)
 
-    # (M-27) Equivalent variation.
-    @NLconstraint(m, [r=s.r], EV[r] == YFD[r,h0] - YFD[r,h0])
+    # (M-33) Equivalent variation for the AIDADS class of demand systems, which
+    # includes LES and Cobb-Douglas (documentation p. 64; the labels M-27/M-28
+    # in the document are the PFACT and PWGDP price anchors, not EV/CV, so the
+    # welfare measure is cited by its real label here):
+    #
+    #   ln(EV_r/Pop_r - Σ_k PC0_{r,k,h} γ_{r,k,h})
+    #       = 1 + ln(A^ad_{r,h}) + u_{r,h} + Σ_k μ^c_{r,k,h} ln(PC0_{r,k,h}/μ^c_{r,k,h})
+    #
+    # evaluated at base-year consumer prices PC0.  With the benchmark price
+    # normalisation PC0 = 1 and the AIDADS shifter A^ad = 1 this solves to the
+    # expression below.  It replaces a `YFD - YFD` tautology that determined
+    # nothing.
+    @NLconstraint(m, [r=s.r],
+        EV[r] == Pop[r] * (sum(gamma_c for k in s.k) +
+                           exp(1 + m[:u][r,h0] +
+                               sum(m[:μc][r,k,h0] * log(1.0 / (m[:μc][r,k,h0] + 1.0e-9)) for k in s.k)))
+    )
 
-    # (M-28) Compensating variation.
-    @NLconstraint(m, [r=s.r], CV[r] == YFD[r,h0] - YFD[r,h0])
+    # (M-28 slot) Compensating variation.  ENVISAGE v10.01 §3.9.4 defines the
+    # equivalent variation only; there is no compensating-variation equation
+    # anywhere in the documentation (the section is flagged "will be revised").
+    # CV is therefore reported as zero rather than as a `YFD - YFD` tautology.
+    @NLconstraint(m, [r=s.r], CV[r] == 0.0)
 
     # (M-29) Global equivalent variation.
     @NLconstraint(m, EVG == sum(EV[r] for r in s.r))
@@ -344,6 +379,98 @@ function _norm_closure_var(rule_or_var)
         "ECAP"=>"EmiCap", "EMICAP"=>"EmiCap"
     )
     return get(aliases, u, strip(raw))
+end
+
+"""
+    apply_default_closures!(m, data)
+
+Fix the variables that ENVISAGE's standard closure treats as exogenous but that
+the workbook's `closures` sheet does not mention.  The list follows the
+documentation's exogenous tables: Table 4.1 (factors: capital stock, zonal
+labour supply), Table 4.2 (macro closure: government expenditure), Table 4.5
+(preferences: the LES/CDE marginal budget shares, endogenous only under AIDADS)
+and Table 4.6 (emissions: other/exogenous emission sources and quota
+allocations), plus two structural cases:
+
+  * `K0` (initially installed Old capital) has no equation anywhere in the
+    document — it is set in `initvint.gms` — so it is data, not a variable;
+  * factor cells that no activity uses (land outside crops and livestock) are
+    structural zeros with no demand equation and no price equation.
+
+Every variable is fixed at its start value, i.e. at the calibrated benchmark, so
+this changes the closure but not the benchmark solution.  Variables already
+fixed by `apply_excel_closures!` are left untouched, so the workbook always
+wins.  Returns a report with the number of instances fixed per family.
+"""
+function apply_default_closures!(m::JuMP.Model, data::EnvData)
+    s = data.sets
+    od = JuMP.object_dictionary(m)
+    report = Dict{String,Int}()
+
+    function fixref!(vref, name::String)
+        (vref === nothing) && return
+        JuMP.is_fixed(vref) && return
+        sv = try JuMP.start_value(vref) catch; nothing end
+        JuMP.fix(vref, sv === nothing ? 0.0 : Float64(sv); force=true)
+        report[name] = get(report, name, 0) + 1
+    end
+    function fixall!(name::Symbol, keys)
+        haskey(od, name) || return
+        obj = m[name]
+        for k in keys
+            vref = try obj[k...] catch; nothing end
+            fixref!(vref, String(name))
+        end
+    end
+
+    demand_system = uppercase(String(get(data.par, "demand_system", "LES")))
+    inv_closure = lowercase(strip(String(get(data.par, "invClosure", "gtap"))))
+    aland = [a for a in s.a if a in s.acr || a in s.alv]
+    anonland = [a for a in s.a if !(a in aland)]
+
+    # Table 4.1: initially installed capital and the aggregate capital stock
+    # that drives the Y-1 depreciation allowance.
+    fixall!(:K0, ((r,a) for r in s.r, a in s.a))
+    fixall!(:Ks, ((r,) for r in s.r))
+    # Table 4.1: zonal labour supply.  F-10 (Ls = Σ_z LSz) determines the first
+    # zone; the remaining zones are exogenous, as in the document where zonal
+    # labour supply grows at the exogenous rate g^lz.
+    if length(s.z) > 1
+        fixall!(:LSz, ((r,l,z) for r in s.r, l in s.l, z in s.z[2:end]))
+    end
+    # Table 4.2: government expenditure is exogenous in the default fiscal
+    # closure (YFD_gov); investment YFD comes from Y-20 and household YFD from
+    # D-36.
+    fixall!(:YFD, ((r,g) for r in s.r, g in s.gov))
+    # Table 4.5: the marginal budget shares μ^c are calibrated parameters under
+    # LES/ELES/CDE; only AIDADS (D-4) makes them endogenous.
+    if demand_system != "AIDADS"
+        fixall!(:μc, ((r,k,h) for r in s.r, k in s.k, h in s.h))
+    end
+    # Table 4.6: exogenous "other" emission sources and emission-quota terms.
+    fixall!(:EmiOth, ((r,e) for r in s.r, e in s.em))
+    fixall!(:EmiOthGbl, ((e,) for e in s.em))
+    fixall!(:EmiQ, ((r,e) for r in s.r, e in s.em))
+    rq = try _emission_coalitions(data) catch; s.r end
+    fixall!(:τEmiQ, ((q,e) for q in rq, e in s.em))
+    # M-22: the regional risk premium R^d is exogenous unless the flexible
+    # foreign-saving closure (M-19) makes it endogenous.
+    if inv_closure != "flexsf"
+        fixall!(:Rd, ((r,) for r in s.r))
+    end
+    # P-3/P-5 use the price of the GHG bundle, PXGHG.  ENVISAGE derives it from
+    # the emission tax schedule (§3.10); that mapping is not part of this port,
+    # so the bundle price is held at its benchmark value.
+    fixall!(:PXGHG, ((r,a,v) for r in s.r, a in s.a, v in s.v))
+    # Land is demanded only by crops and livestock (P-14), so for every other
+    # activity the land cell of XF is a structural zero with no demand equation
+    # and its price has no market-clearing condition (F-36 covers agriculture).
+    if !isempty(s.lnd)
+        lnd0 = first(s.lnd)
+        fixall!(:XF, ((r,lnd0,a) for r in s.r, a in anonland))
+        fixall!(:PF, ((r,lnd0,a) for r in s.r, a in anonland))
+    end
+    return report
 end
 
 function apply_excel_closures!(m::JuMP.Model, data::EnvData)

@@ -45,14 +45,17 @@ function demand_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
     demand_system = uppercase(String(_envisage_flag(data, "demand_system", "LES")))
     waste_flag = Bool(_envisage_flag(data, "waste_module", true))
 
+    # `YC` (nominal consumption) was declared but appears in no ENVISAGE
+    # equation of this port, and `ZC` is the CDE auxiliary variable used only by
+    # D-5:D-7.  Declaring them unconditionally left 3 + 60 permanently
+    # undetermined instances; ZC is now declared only in the CDE branch and YC
+    # is dropped.
     @variables(m, begin
         Ysup[s.r,s.h]
-        YC[s.r,s.h] >= 0
         XC[s.r,s.k,s.h] >= 0
         PC[s.r,s.k,s.h] >= 0
         μc[s.r,s.k,s.h] >= 0
         u[s.r,s.h]
-        ZC[s.r,s.k,s.h] >= 0
         shr[s.r,s.k,s.h] >= 0
         XCnnrg[s.r,s.k,s.h] >= 0
         XCnrg[s.r,s.k,s.h] >= 0
@@ -78,7 +81,10 @@ function demand_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
         PAw[s.r,s.i,s.h] >= 0
         XFD[s.r,s.fd] >= 0
         PFD[s.r,s.fd] >= 0
-        QFD[s.r,s.fd,s.t,s.t] >= 0
+        # D-35 only builds the Fisher-index indicator for household agents, so
+        # QFD is declared over s.h rather than the full final-demand set (the
+        # government/investment slices had no equation).
+        QFD[s.r,s.h,s.t,s.t] >= 0
     end)
 
     # Use the document's common final-demand/Armington variables declared elsewhere.
@@ -145,6 +151,8 @@ function demand_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
             [r=s.r,k=s.k,h=s.h], shr[r,k,h] == PC[r,k,h] * XC[r,k,h] / (YD[r] - Sh[r] + 1e-9)
         end)
     elseif demand_system == "CDE"
+        # ZC is the CDE auxiliary variable (D-5:D-7); it exists only here.
+        @variable(m, ZC[s.r,s.k,s.h] >= 0)
         @NLconstraints(m, begin
             # (D-5) CDE auxiliary variable.
             [r=s.r,k=s.k,h=s.h], ZC[r,k,h] == αc[k] * (u[r,h] + 1e-9) * (PC[r,k,h] / ((YD[r] - Sh[r]) + 1e-9))
@@ -200,9 +208,37 @@ function demand_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
         [r=s.r,k=s.k,h=s.h], PColg[r,k,h] == (αc[k]*PCoil[r,k,h]^(1-νolg) + αc[k]*PCgas[r,k,h]^(1-νolg))^(1/(1-νolg))
         # (D-23) Energy Armington demand by households.
         [r=s.r,i=s.nrg,h=s.h], XAh[r,i,h] == sum(αi[i] * XCnrg[r,k,h] for k in s.k)
-        # (D-24) Energy Armington consumer price.
-        [r=s.r,i=s.nrg,h=s.h], PAh[r,i,h] == PA[r,i,h]
+        # XAh is this port's name for the household Armington demand that
+        # ENVISAGE writes directly as XA(r,i,h); D-27:D-32 use the latter, so
+        # the two are tied together here rather than leaving XA[r,i,h] with no
+        # determining equation.
+        [r=s.r,i=s.i,h=s.h], XA[r,i,h] == XAh[r,i,h]
     end)
+
+    # (D-24) Consumer prices of the household energy carriers.  The household
+    # energy nest D-14:D-22 splits XCnrg into an electricity bundle and a
+    # non-electric bundle (coal, then oil and gas); each carrier faces the
+    # household Armington purchaser price PAh of the corresponding commodity.
+    # The previous version of D-24 instead repeated `PAh == PA` for the energy
+    # commodities, duplicating D-32 and leaving PCely/PCcoa/PCoil/PCgas — 240
+    # instances — with no equation at all.
+    ccarrier_p = Dict("ELY"=>PCely, "COA"=>PCcoa, "OIL"=>PCoil, "GAS"=>PCgas)
+    for key in ["ELY", "COA", "OIL", "GAS"]
+        Pk = ccarrier_p[key]
+        match_i = findfirst(i -> _nrg_carrier_key(i) == key, s.i)
+        if match_i === nothing
+            # No commodity for this carrier in the aggregation: the node is
+            # inactive and its price is held at the benchmark value 1.
+            for r in s.r, k in s.k, h in s.h
+                @NLconstraint(m, Pk[r,k,h] == 1.0)
+            end
+        else
+            ii = s.i[match_i]
+            for r in s.r, k in s.k, h in s.h
+                @NLconstraint(m, Pk[r,k,h] == PAh[r,ii,h])
+            end
+        end
+    end
 
     if demand_system == "ELES"
         @NLconstraints(m, begin
@@ -286,12 +322,13 @@ function demand_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
         )
     end
 
-    # (D-36) Household nominal final demand expenditure is not declared as a
-    # separate equation: s.h is a subset of s.fd (households are one of the
-    # final-demand agents), so `YFD[r,h] == PFD[r,h]*XFD[r,h]` for h in s.h is a
-    # literal duplicate of D-37 below restricted to fd in s.h.  Declaring both
-    # would pair two identical equations with the same YFD[r,h] instances.
+    # (D-36) Household nominal final-demand expenditure.  This is NOT a
+    # duplicate of D-37: D-37 is the price/quantity identity YFD = PFD*XFD (it
+    # determines XFD), while D-36 values the household Armington basket and is
+    # what determines YFD[r,h].  An earlier version dropped D-36 as a duplicate,
+    # which left XFD[r,h] and XFD[r,gov] with no determining equation.
     @NLconstraints(m, begin
+        [r=s.r,h=s.h], YFD[r,h] == sum(PAh[r,i,h] * XA[r,i,h] for i in s.i)
         # (D-37) Nominal/real final demand identity (covers households as well
         # as government and investment, since s.h ⊆ s.fd).
         [r=s.r,fd=s.fd], YFD[r,fd] == PFD[r,fd] * XFD[r,fd]

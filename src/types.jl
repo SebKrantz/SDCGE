@@ -61,6 +61,18 @@ safeget(d, k, default=0.0) = default
 is_crop(s::EnvSets, a::String) = a in s.acr
 is_livestock(s::EnvSets, a::String) = a in s.alv
 is_other_activity(s::EnvSets, a::String) = a in s.ax
+
+"""
+    default_activities(s::EnvSets)
+
+The activity set for the "all other activities" branch of the ENVISAGE
+production nests P-9:P-17.  The document splits `a` into crops (`acr`),
+livestock (`alv`) and everything else; the workbook's `ax` set lists only the
+non-agricultural, non-power activities, so using `ax` directly leaves the power
+activities (`elya`) without any value-added nest.  This helper returns the
+document's default branch, `a \\ (acr ∪ alv)`.
+"""
+default_activities(s::EnvSets) = [a for a in s.a if !(a in s.acr) && !(a in s.alv)]
 is_power_activity(s::EnvSets, a::String) = a in s.elya
 is_electric_commodity(s::EnvSets, i::String) = i in s.ely
 is_transmission_distribution_activity(s::EnvSets, a::String) = a in s.etd

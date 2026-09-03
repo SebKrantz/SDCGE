@@ -27,7 +27,7 @@ function equation_variable_map(data::EnvData)
         "KF", "XNRG", "PKEF", "KSW", "XF", "PKF", "KS", "XWAT", "PKSW",
         "K", "LAB2", "PKS", "XF", "PLAB1", "PLAB2", "XA", "PND1", "PND2",
         "XF", "PWAT", "XAely", "XNELY", "PNRG", "XAcoa", "XOLG", "PNELY",
-        "XAoil", "XAgas", "POLG", "XANRG", "PANRG"
+        "XAoil", "XAgas", "POLG", "XA", "PAely"
     ]
     for (k, v) in enumerate(prod_vars); m["P-$k"] = v; end
 
@@ -37,7 +37,7 @@ function equation_variable_map(data::EnvData)
     income_vars = ["DeprY","ntmY","YQTF","TrustY","YQHT","Remit","ODAOut","ODAGbl","ODAIn","YH","YD","YGOV","YGOV","YGOV","YGOV","YGOV","YGOV","YGOV","YGOV","YFD"]
     for (k, v) in enumerate(income_vars); m["Y-$k"] = v; end
 
-    demand_vars = ["Ysup","XC","u","μc","ZC","shr","ZC","shr","XCnnrg","XCnrg","PC","XAh","PCnnrg","XCely","XCnely","PCnrg","XCcoa","XColg","PCnely","XCoil","XCgas","PColg","XAh","PAh","Sh","Sh","XAc","XAw","PACC","PAc","PAw","PAh","XA","PFD","QFD","YFD","YFD"]
+    demand_vars = ["Ysup","XC","u","μc","ZC","shr","ZC","shr","XCnnrg","XCnrg","PC","XAh","PCnnrg","XCely","XCnely","PCnrg","XCcoa","XColg","PCnely","XCoil","XCgas","PColg","XAh","PCely","Sh","Sh","XAc","XAw","PACC","PAc","PAw","PAh","XA","PFD","QFD","YFD","XFD"]
     for (k, v) in enumerate(demand_vars); m["D-$k"] = v; end
 
     trade_vars = ["XAT","XDTd","XMT","PAT","PA","XD","XM","PA","PD","PM","XDTd","XMT","XWd","PMT","XWa","PMa","PDMa","XWd","XDTs","XET","PS","XWs","PET","PWE","PWM","PDM","XWMG","XMG","PWMG","XTMG","XTT","PTMG"]
@@ -64,13 +64,18 @@ function equation_variable_map(data::EnvData)
     m["E-1"] = "XDTd"
     m["E-2"] = "XWd"
 
+    # Complementarity pairing of the factor block.  F-15/F-16 are the two
+    # documented inequalities (F-15 is complementary to RR <= 1, F-16 to
+    # Khi >= 0, documentation p. 47); F-17 closes Klo.  The three factor-market
+    # clearing conditions F-36 (land), F-39 (natural resources) and F-51 (water)
+    # are what price the corresponding factor, so they pair with PF.
     factor_vars = [
-        "LDz", "Wres", "We", "UEz", "PF", "Wa", "piUrb", "Wt", "piS", "Ls", "TLs",
-        "K", "TR", "Kv", "Klo", "RR", "Klo", "TKs", "PK", "kxRat", "XPv", "XP", "XF", "PF",
-        "TLand", "XLB", "XNLB", "PTLandN", "PTLand", "XLB", "PNLBN", "PNLB", "Lands", "PLBN", "PLB", "Lands",
-        "etaNRS", "XNRSs", "XNRFs",
+        "LDz", "Wres", "We", "UEz", "PF", "Wa", "piUrb", "Wt", "piS", "LSz", "TLs",
+        "K", "TR", "Kv", "RR", "Khi", "Klo", "TR", "PK", "kxRat", "XPv", "XPv", "XF", "PF",
+        "TLand", "XLB", "XNLB", "PTLandN", "PTLand", "XLB", "PNLBN", "PNLB", "Lands", "PLBN", "PLB", "PF",
+        "etaNRS", "XNRSs", "PF",
         "TH2O", "TH2Om", "H2OBnd", "PTH2On", "PTH2O", "H2OBnd", "PH2OBndN", "PH2OBnd",
-        "H2Os", "PH2OBndN", "PH2OBnd", "H2Os", "H2OBndd", "H2OBnd",
+        "H2Os", "PH2OBndN", "PH2OBnd", "PF", "H2OBndd", "H2OBnd",
         "PFp", "PKp"
     ]
     for (k, v) in enumerate(factor_vars); m["F-$k"] = v; end
@@ -115,6 +120,17 @@ function _inactive_closure_families(data::EnvData)
         union!(inactive, _ARMFLAG_ONLY_FAMILIES)
         ifMRIO || union!(inactive, _MRIO_OR_ARMFLAG_FAMILIES)
     end
+    # ZC is the CDE auxiliary variable of D-5:D-7; demand.jl only declares it in
+    # the CDE branch, so under any other demand system it is legitimately absent.
+    if uppercase(String(get(data.par, "demand_system", "LES"))) != "CDE"
+        push!(inactive, "ZC")
+    end
+    # The ENVISAGE water-bundle hierarchy F-42:F-53 is keyed on the document's
+    # bundle labels; with an aggregation that uses none of them factors.jl
+    # declares no bundle variables at all and those equations are not generated.
+    if isempty(unique(vcat(_wb1(data.sets), _wb2(data.sets), _wbx(data.sets))))
+        union!(inactive, ["H2OBnd", "H2OBndd", "PH2OBnd", "PH2OBndN"])
+    end
     return inactive
 end
 
@@ -129,6 +145,15 @@ function _declared_variable_bases(jm::JuMP.Model)
     return bases
 end
 
+
+function _path_free_variable_count(jm::JuMP.Model)
+    n = 0
+    for v in JuMP.all_variables(jm)
+        fixed = try JuMP.is_fixed(v) catch; false end
+        fixed || (n += 1)
+    end
+    return n
+end
 
 function _path_nonbound_constraint_count(jm::JuMP.Model)
     n = JuMP.num_constraints(jm; count_variable_in_set_constraints=false)
@@ -160,7 +185,9 @@ function path_mapping_report(em::EnvModel)
     extra_mapping = setdiff(Set(keys(mapping)), Set(keys(registry)))
     inactive_families = _inactive_closure_families(em.data)
     undeclared_vars = setdiff(mapped_vars, union(declared, exogenous_hooks, inactive_families))
-    nvar = em.jump === nothing ? 0 : JuMP.num_variables(em.jump)
+    # Fixed variables are pinned by their bounds and need no complementarity
+    # function, so squareness is judged on the free variables.
+    nvar = em.jump === nothing ? 0 : _path_free_variable_count(em.jump)
     ncon = em.jump === nothing ? 0 : _path_nonbound_constraint_count(em.jump)
     return Dict{String,Any}(
         "registry_equations" => length(registry),
@@ -188,7 +215,7 @@ function assert_path_ready!(em::EnvModel; require_square::Bool=true)
         error("PATH mapping refers to variable families that are not declared in the JuMP model: $(rep["undeclared_mapped_variable_families"])")
     end
     if require_square && !rep["square_for_path"]
-        error("PATH requires a square MCP. Current model has $(rep["variable_count"]) variables and $(rep["constraint_count_excluding_bounds"]) non-bound constraints. Add/remove closure equations or fix exogenous variables until these counts match. Use path_mapping_report(model) for details.")
+        error("PATH requires a square MCP. Current model has $(rep["variable_count"]) free variables and $(rep["constraint_count_excluding_bounds"]) non-bound constraints. Add/remove closure equations or fix exogenous variables until these counts match. Use path_mapping_report(model) for details.")
     end
     em.solution["path_mapping_report"] = rep
     return rep

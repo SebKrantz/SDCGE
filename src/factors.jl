@@ -37,9 +37,19 @@ function _activities_in_zone(s::EnvSets, z::String)
 end
 
 function _land_activities_for_bundle(s::EnvSets, lb::String, lb1::String)
-    # ENVISAGE uses a user mapping from land bundles to activities.  If the
-    # workbook does not provide that mapping, the benchmark-safe fallback is the
-    # documented agricultural land domain in the first land bundle.
+    # ENVISAGE uses a user mapping from land bundles to activities.  The
+    # workbook does not supply one, so bundles are matched to the documented
+    # land-using activity groups by label (crop bundles to `acr`, pasture /
+    # grazing / livestock bundles to `alv`); an unrecognised label falls back to
+    # the whole agricultural land domain in the first bundle.  Previously every
+    # bundle other than the first was mapped to no activity at all, which left
+    # its price index PLBN and its average price PLB undetermined.
+    u = uppercase(lb)
+    if occursin("CROP", u) || occursin("CRP", u) || occursin("ARABLE", u)
+        return s.acr
+    elseif occursin("PAST", u) || occursin("GRAZ", u) || occursin("LVS", u) || occursin("LIVE", u)
+        return s.alv
+    end
     return lb == lb1 ? union(s.acr, s.alv) : String[]
 end
 
@@ -95,6 +105,13 @@ function factors_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
     chi_t = PAR[:chi_t]
     chi_w_nrs = PAR[:chi_w_nrs]
     controls = PAR[:controls]
+    # Domain for kxRat: ENVISAGE F-20/F-21 define the capital-output ratio only
+    # for the installed ("Old") vintage (documentation p. 48).
+    vold_dom = [_old_vintage(data.sets)]
+    # Water-bundle domains: only labels the ENVISAGE hierarchy recognises.
+    wbnd_dom = unique(vcat(_wb1(data.sets), _wb2(data.sets), _wbx(data.sets)))
+    # Land-using activities (P-14): crops and livestock only.
+    aland = [a for a in data.sets.a if a in data.sets.acr || a in data.sets.alv]
     epsilon_h2ob = PAR[:epsilon_h2ob]
     eta_I = PAR[:eta_I]
     eta_h2ob = PAR[:eta_h2ob]
@@ -126,7 +143,6 @@ function factors_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
         Wres[s.r,s.l,s.z] >= 0
         We[s.r,s.l,s.z] >= 0
         0 <= UEz[s.r,s.l,s.z] <= 0.999
-        UEMin[s.r,s.l,s.z] >= 0
         LSz[s.r,s.l,s.z] >= 0
         Wa[s.r,s.l,s.z] >= 0
         piUrb[s.r,s.l] >= 0
@@ -144,7 +160,10 @@ function factors_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
         Khi[s.r,s.a] >= 0
         K0[s.r,s.a] >= 0
         0 <= RR[s.r,s.a] <= 1
-        kxRat[s.r,s.a,s.v] >= 0
+        # F-20/F-21 define the capital-output ratio only for the installed
+        # ("old") vintage, so kxRat is declared over that vintage alone; the new
+        # vintage slice previously had no equation.
+        kxRat[s.r,s.a,vold_dom] >= 0
 
         # Land market variables
         TLand[s.r] >= 0
@@ -156,27 +175,35 @@ function factors_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
         PNLBN[s.r] >= 0
         PNLB[s.r] >= 0
         PLBN[s.r,s.lb] >= 0
-        Lands[s.r,s.a] >= 0
+        # Land is demanded only by crops and livestock (P-14/F-33/F-36).
+        Lands[s.r,aland] >= 0
 
         # Natural resource market variables
         etaNRS[s.r,s.a] >= 0
         XNRSs[s.r,s.a] >= 0
-        XNRFs[s.r,s.a] >= 0
 
         # Water market variables
         TH2O[s.r] >= 0
         PTH2O[s.r] >= 0
         TH2Om[s.r] >= 0
+        # The water-bundle families exist only for the bundle labels the
+        # ENVISAGE water hierarchy F-42:F-53 recognises (AGR/NAG, CRP/LVS/IND/
+        # MUN, ENV/GRD).  With any other `wbnd` aggregation those equations are
+        # never generated, so the families are declared over the matched labels
+        # only instead of leaving every instance undetermined.  PTH2On (F-43) is
+        # likewise pinned to PTH2O when that nest is absent (see F-43 below).
         PTH2On[s.r] >= 0
-        H2OBnd[s.r,s.wbnd] >= 0
-        PH2OBnd[s.r,s.wbnd] >= 0
-        PH2OBndN[s.r,s.wbnd] >= 0
+        H2OBnd[s.r,wbnd_dom] >= 0
+        PH2OBnd[s.r,wbnd_dom] >= 0
+        PH2OBndN[s.r,wbnd_dom] >= 0
         H2Os[s.r,s.a] >= 0
-        H2OBndd[s.r,s.wbnd] >= 0
+        H2OBndd[s.r,wbnd_dom] >= 0
 
         # Macro price used in F-25/F-38/F-40 if not declared elsewhere yet.
         PGDPMP[s.r] >= 0
-        gY[s.r]
+        # `gy` (growth of real per-capita GDP) is the ENVISAGE M-5 variable; the
+        # factor block previously declared a second, undetermined copy `gY`.
+        gy[s.r]
 
         # Factor-market price paid to factor owners, used in F-5/F-8/F-24/F-54.
         PF[s.r,s.fp,s.a] >= 0
@@ -253,7 +280,7 @@ function factors_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
         # (F-1) Labor demand within the relevant labor-market zone.
         @NLconstraint(m, LDz[r,l,z] == sum(XF[r,l,a] for a in az))
         # (F-2) Reservation wage.
-        @NLconstraint(m, Wres[r,l,z] == chi_rw * (1 + gY[r])^omega_rw_g * ((1 - UEz[r,l,z]) / 1.0)^omega_rw_ue * (PFD[r,href] / 1.0)^omega_rw_p)
+        @NLconstraint(m, Wres[r,l,z] == chi_rw * (1 + gy[r])^omega_rw_g * ((1 - UEz[r,l,z]) / 1.0)^omega_rw_ue * (PFD[r,href] / 1.0)^omega_rw_p)
         # (F-3) Labor-market complementarity wage inequality.
         @NLconstraint(m, We[r,l,z] >= Wres[r,l,z])
         # (F-4) Unemployment definition.
@@ -287,49 +314,72 @@ function factors_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
         @NLconstraint(m, TLs[r] == sum(Ls[r,l] for l in s.l))
     end
 
-    for r in s.r
-        if isfinite(omega_k)
-            for a in s.a, v in s.v
-                # (F-12) Comparative-static capital supply allocation.
-                @NLconstraint(m, K[r,a,v] == alpha_capital_supply[a] * (PK[r,a,v] / TR[r])^omega_k * TKs[r])
+    # ENVISAGE §3.8.2 splits the capital market into two ALTERNATIVE closures
+    # (documentation pp. 46-48):
+    #   * the comparative-static closure, F-12 (CET allocation of TKs across
+    #     activities) + F-13 (aggregate rate of return) + F-14, and
+    #   * the vintage-capital closure, F-15:F-24, in which F-18 (not F-13)
+    #     "determines the economy-wide rate of return, TR" and PK follows from
+    #     F-19.
+    # This port previously generated both at once, so K and TR were each
+    # determined twice (252 equations for 126 K instances, 6 for 3 TR).
+    # `data.par["capClosure"]` selects one:
+    #   "vintage" (default) -> F-14:F-24, "static" -> F-12:F-14 + F-22:F-24.
+    cap_closure = lowercase(strip(String(get(data.par, "capClosure", "vintage"))))
+    cap_closure in ["vintage", "static"] ||
+        error("Unknown data.par[\"capClosure\"] = $(cap_closure). Use \"vintage\" or \"static\".")
+    vintage_capital = cap_closure == "vintage"
+
+    if !vintage_capital
+        for r in s.r
+            if isfinite(omega_k)
+                for a in s.a, v in s.v
+                    # (F-12) Comparative-static capital supply allocation.
+                    @NLconstraint(m, K[r,a,v] == alpha_capital_supply[a] * (PK[r,a,v] / TR[r])^omega_k * TKs[r])
+                end
+            else
+                for a in s.a, v in s.v
+                    # (F-12) Comparative-static capital supply allocation, perfect mobility case.
+                    @NLconstraint(m, PK[r,a,v] == TR[r])
+                end
             end
-        else
-            for a in s.a, v in s.v
-                # (F-12) Comparative-static capital supply allocation, perfect mobility case.
-                @NLconstraint(m, PK[r,a,v] == TR[r])
-            end
+            # (F-13) Aggregate rate of return to capital.
+            @NLconstraint(m, TR[r] * TKs[r] == sum(PK[r,a,v] * K[r,a,v] for a in s.a, v in s.v))
         end
-        # (F-13) Aggregate rate of return to capital.
-        @NLconstraint(m, TR[r] * TKs[r] == sum(PK[r,a,v] * K[r,a,v] for a in s.a, v in s.v))
-        for a in s.a, v in s.v
-            # (F-14) Capital supply equals capital demand.
-            @NLconstraint(m, Kv[r,a,v] == K[r,a,v])
-        end
+    end
+    for r in s.r, a in s.a, v in s.v
+        # (F-14) Capital supply equals capital demand.  Holds in both closures.
+        @NLconstraint(m, Kv[r,a,v] == K[r,a,v])
     end
 
     for r in s.r, a in s.a
-        if isfinite(eta_I)
-            # (F-15) Old capital supply complementarity condition.
-            @NLconstraint(m, Klo[r,a] >= K0[r,a] * RR[r,a]^eta_I)
-        else
-            # (F-15) Old capital supply, horizontal supply case.
-            @NLconstraint(m, RR[r,a] == 1)
+        if vintage_capital
+            if isfinite(eta_I)
+                # (F-15) Old capital supply complementarity condition
+                # (Klo >= K0*RR^etaI, complementary to RR <= 1).
+                @NLconstraint(m, Klo[r,a] >= K0[r,a] * RR[r,a]^eta_I)
+            else
+                # (F-15) Old capital supply, horizontal supply case.
+                @NLconstraint(m, RR[r,a] == 1)
+            end
+            # (F-16) New capital complementarity return-ratio condition
+            # (RR <= 1, complementary to Khi >= 0).
+            @NLconstraint(m, RR[r,a] <= 1)
+            # (F-17) Total capital supply meets total capital demand.
+            @NLconstraint(m, Klo[r,a] + Khi[r,a] <= sum(K[r,a,v] for v in s.v))
+            for v in s.v
+                # (F-19) Sector- and vintage-specific rate of return.
+                @NLconstraint(m, PK[r,a,v] == RR[r,a] * TR[r])
+            end
+            if oldv in s.v
+                # (F-20) Old-vintage capital-output ratio.
+                @NLconstraint(m, kxRat[r,a,oldv] == K[r,a,oldv] / XPv[r,a,oldv])
+                # (F-21) Output with old capital.
+                @NLconstraint(m, kxRat[r,a,oldv] * XPv[r,a,oldv] == Klo[r,a])
+            end
         end
-        # (F-16) New capital complementarity return-ratio condition.
-        @NLconstraint(m, RR[r,a] <= 1)
-        # (F-17) Total capital supply meets total capital demand.
-        @NLconstraint(m, Klo[r,a] + Khi[r,a] <= sum(K[r,a,v] for v in s.v))
-        for v in s.v
-            # (F-19) Sector- and vintage-specific rate of return.
-            @NLconstraint(m, PK[r,a,v] == RR[r,a] * TR[r])
-        end
-        if oldv in s.v
-            # (F-20) Old-vintage capital-output ratio.
-            @NLconstraint(m, kxRat[r,a,oldv] == K[r,a,oldv] / XPv[r,a,oldv])
-            # (F-21) Output with old capital.
-            @NLconstraint(m, kxRat[r,a,oldv] * XPv[r,a,oldv] == Klo[r,a])
-        end
-        # (F-22) Aggregate output across vintages.
+        # (F-22) Aggregate output across vintages.  In the vintage closure this
+        # determines output with New capital (documentation p. 48).
         @NLconstraint(m, XP[r,a] == sum(XPv[r,a,v] for v in s.v))
         for f in s.cap
             # (F-23) Capital factor demand accounting identity.
@@ -340,9 +390,12 @@ function factors_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
             end
         end
     end
-    for r in s.r
-        # (F-18) Aggregate capital supply.
-        @NLconstraint(m, TKs[r] == sum(K[r,a,v] for a in s.a, v in s.v))
+    if vintage_capital
+        for r in s.r
+            # (F-18) Aggregate capital supply; determines the economy-wide rate
+            # of return TR in the vintage closure.
+            @NLconstraint(m, TKs[r] == sum(K[r,a,v] for a in s.a, v in s.v))
+        end
     end
 
     for r in s.r
@@ -440,8 +493,9 @@ function factors_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
             end
         end
     end
-    for r in s.r, a in s.a, f in s.lnd
-        # (F-36) Land supply equals land demand by activity.
+    for r in s.r, a in aland, f in s.lnd
+        # (F-36) Land supply equals land demand by activity; this is the
+        # land-market clearing condition that prices PF[r,lnd,a].
         @NLconstraint(m, Lands[r,a] == XF[r,f,a])
     end
 
@@ -456,13 +510,15 @@ function factors_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
                 # (F-38) Natural resource supply, horizontal case.
                 @NLconstraint(m, chi_nrsp * PF[r,nrs0,a] == PGDPMP[r])
             end
-            # (F-39) Natural resource equilibrium.
-            @NLconstraint(m, XNRFs[r,a] == sum(XF[r,f,a] for f in s.nrs))
+            # (F-39) Natural resource equilibrium: supply meets activity demand.
+            # This is the market-clearing condition that prices the natural
+            # resource, i.e. it is paired with PF[r,nrs,a].  The former version
+            # only *defined* an auxiliary demand aggregate XNRFs and therefore
+            # left PF[r,nrs,a] with no determining equation; XNRFs is dropped.
+            @NLconstraint(m, XNRSs[r,a] == sum(XF[r,f,a] for f in s.nrs))
         else
             # (F-38) Natural resource supply, no natural-resource-account case.
             @NLconstraint(m, XNRSs[r,a] == 0)
-            # (F-39) Natural resource equilibrium, no natural-resource-account case.
-            @NLconstraint(m, XNRFs[r,a] == 0)
         end
     end
 
@@ -547,8 +603,29 @@ function factors_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
                 @NLconstraint(m, PH2OBnd[r,wb] * H2OBnd[r,wb] == sum(PF[r,wat0,a] * H2Os[r,a] for a in acts))
             end
         end
+        if isempty(wb1s)
+            # (F-43) With no first-level water bundle the adjusted-CES index
+            # collapses onto the marketed water price.
+            @NLconstraint(m, PTH2On[r] == PTH2O[r])
+        end
+        if isempty(wbas)
+            # (F-48)/(F-50) Degenerate single-bundle water market.  The
+            # ENVISAGE water-bundle hierarchy (F-42:F-50) is keyed on the
+            # document's bundle labels AGR/NAG/CRP/LVS/IND/MUN/ENV/GRD; when the
+            # aggregation's `wbnd` set uses none of them (as in the shipped
+            # workbook, which has IRR/NONIRR) none of those equations can be
+            # instantiated and H2Os and PTH2O are left undetermined.  In that
+            # case marketed water is a single bundle allocated directly to
+            # activities by the same CET form, and its average price is the
+            # value-share identity F-50 written for that single bundle.
+            for a in s.a
+                @NLconstraint(m, H2Os[r,a] == alpha_water_activity[a] * (PF[r,wat0,a] / PTH2O[r])^omega_w2 * TH2Om[r])
+            end
+            @NLconstraint(m, PTH2O[r] * TH2Om[r] == sum(PF[r,wat0,a] * H2Os[r,a] for a in s.a))
+        end
         for a in s.a, f in s.wat
-            # (F-51) Water supply equals activity water demand.
+            # (F-51) Water supply equals activity water demand; this is the
+            # water-market clearing condition that prices PF[r,wat,a].
             @NLconstraint(m, H2Os[r,a] == XF[r,f,a])
         end
             for wb in wbis

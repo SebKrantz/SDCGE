@@ -79,6 +79,14 @@ function production_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
     tau_uc = PAR[:tau_uc]
     s = data.sets
     n_i = max(length(s.i),1); n_ul = max(length(s.ul),1); n_sl = max(length(s.sl),1); n_nrg = max(length(s.nrg),1); n_wat = max(length(s.wat),1)
+    # ENVISAGE P-9:P-17 split `a` into crops, livestock and "all other
+    # activities".  `s.ax` from the workbook omits the power activities
+    # (`elya`), which left them without a value-added nest, so the document's
+    # own default branch a \ (acr ∪ alv) is used instead (see types.jl).
+    adef = default_activities(s)
+    # Activities that use land: only crops and livestock have a land nest in
+    # P-14, so land demand/supply is restricted to them (F-33/F-36).
+    aland = [a for a in s.a if a in s.acr || a in s.alv]
 
     # Parameters are precomputed in ParameterTables.jl and indexed directly as PAR[:...].
 
@@ -101,7 +109,12 @@ function production_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
         XWAT[s.r,s.a] >= 0; PWAT[s.r,s.a] >= 0
         XF[s.r,s.fp,s.a] >= 0; PFp[s.r,s.fp,s.a] >= 0
         # Intermediate and energy nests, P-30:P-48
-        XA[s.r,s.i,s.aa] >= 0; PAa[s.r,s.i,s.a] >= 0; PA[s.r,s.i,s.aa] >= 0
+        # ENVISAGE has a single Armington purchaser price PA[r,i,aa] (T-5) for
+        # every agent aa, activities included.  The former `PAa[r,i,a]` family was
+        # a duplicate of the activity slice PA[r,i,a]: it carried no equation of
+        # its own (1,260 undetermined instances) while T-5 already prices exactly
+        # the same flows.  P-33/P-34/P-35/P-47/P-48 now read PA[r,i,a] directly.
+        XA[s.r,s.i,s.aa] >= 0; PA[s.r,s.i,s.aa] >= 0
         XNRG[s.r,s.a,s.v] >= 0; PNRG[s.r,s.a,s.v] >= 0
         XNELY[s.r,s.a,s.v] >= 0; PNELY[s.r,s.a,s.v] >= 0
         XOLG[s.r,s.a,s.v] >= 0; POLG[s.r,s.a,s.v] >= 0
@@ -109,7 +122,6 @@ function production_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
         XAcoa[s.r,s.a,s.v] >= 0; PAcoa[s.r,s.a,s.v] >= 0
         XAoil[s.r,s.a,s.v] >= 0; PAoil[s.r,s.a,s.v] >= 0
         XAgas[s.r,s.a,s.v] >= 0; PAgas[s.r,s.a,s.v] >= 0
-        XANRG[s.r,s.a,s.v] >= 0; PANRG[s.r,s.a,s.v] >= 0
     end)
 
     @NLconstraints(m, begin
@@ -130,15 +142,15 @@ function production_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
         # Crops use acr only; livestock uses alv only; default/other activities use ax only.
         [r=s.r,a=s.acr,v=s.v], VA1[r,a,v] == alpha_crop_va_VA1[a] * (PVA[r,a,v]/PVA1[r,a,v])^sigma_v * VA[r,a,v]
         [r=s.r,a=s.alv,v=s.v], VA1[r,a,v] == alpha_livestock_va_VA1[a] * (PVA[r,a,v]/PVA1[r,a,v])^sigma_v * VA[r,a,v]
-        [r=s.r,a=s.ax,v=s.v], VA1[r,a,v] == alpha_def_va_VA1[a] * (PVA[r,a,v]/PVA1[r,a,v])^sigma_v * VA[r,a,v]
+        [r=s.r,a=adef,v=s.v], VA1[r,a,v] == alpha_def_va_VA1[a] * (PVA[r,a,v]/PVA1[r,a,v])^sigma_v * VA[r,a,v]
         [r=s.r,a=s.acr,v=s.v], VA2[r,a,v] == alpha_crop_va1_VA2[a] * (PVA1[r,a,v]/PVA2[r,a,v])^sigma_v1 * VA1[r,a,v]
         [r=s.r,a=s.alv,v=s.v], VA2[r,a,v] == alpha_livestock_va1_VA2[a] * (PVA1[r,a,v]/PVA2[r,a,v])^sigma_v1 * VA1[r,a,v]
         [r=s.r,a=s.acr,v=s.v], KEF[r,a,v] == alpha_crop_va2_KEF[a] * (PVA2[r,a,v]/PKEF[r,a,v])^sigma_v2 * VA2[r,a,v]
         [r=s.r,a=s.alv,v=s.v], KEF[r,a,v] == alpha_livestock_va1_KEF[a] * (PVA1[r,a,v]/PKEF[r,a,v])^sigma_v1 * VA1[r,a,v]
-        [r=s.r,a=s.ax,v=s.v], KEF[r,a,v] == alpha_def_va1_KEF[a] * (PVA1[r,a,v]/PKEF[r,a,v])^sigma_v1 * VA1[r,a,v]
+        [r=s.r,a=adef,v=s.v], KEF[r,a,v] == alpha_def_va1_KEF[a] * (PVA1[r,a,v]/PKEF[r,a,v])^sigma_v1 * VA1[r,a,v]
         [r=s.r,a=s.acr], LAB1[r,a] == sum(alpha_crop_va_LAB1[a] * (PVA[r,a,v]/PLAB1[r,a])^sigma_v * VA[r,a,v] for v in s.v)
         [r=s.r,a=s.alv], LAB1[r,a] == sum(alpha_livestock_va_LAB1[a] * (PVA[r,a,v]/PLAB1[r,a])^sigma_v * VA[r,a,v] for v in s.v)
-        [r=s.r,a=s.ax], LAB1[r,a] == sum(alpha_def_va_LAB1[a] * (PVA[r,a,v]/PLAB1[r,a])^sigma_v * VA[r,a,v] for v in s.v)
+        [r=s.r,a=adef], LAB1[r,a] == sum(alpha_def_va_LAB1[a] * (PVA[r,a,v]/PLAB1[r,a])^sigma_v * VA[r,a,v] for v in s.v)
         [r=s.r,a=s.acr], ND2[r,a] == sum(alpha_crop_va1_ND2[a] * (PVA1[r,a,v]/PND2[r,a])^sigma_v1 * VA1[r,a,v] for v in s.v)
         [r=s.r,a=s.alv], ND2[r,a] == sum(alpha_livestock_va2_FEED[a] * (PVA2[r,a,v]/PND2[r,a])^sigma_v2 * VA2[r,a,v] for v in s.v)
         # (P-14) land factor demand is restricted to crop and livestock activities and lnd factors.
@@ -147,10 +159,10 @@ function production_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
         # (P-15)--(P-17) CES dual prices for VA, VA1, VA2 by subset.
         [r=s.r,a=s.acr,v=s.v], PVA[r,a,v] == (alpha_crop_va_LAB1[a]*PLAB1[r,a]^(1-sigma_v) + alpha_crop_va_VA1[a]*PVA1[r,a,v]^(1-sigma_v))^(1/(1-sigma_v))
         [r=s.r,a=s.alv,v=s.v], PVA[r,a,v] == (alpha_livestock_va_VA1[a]*PVA1[r,a,v]^(1-sigma_v) + alpha_livestock_va_VA2[a]*PVA2[r,a,v]^(1-sigma_v))^(1/(1-sigma_v))
-        [r=s.r,a=s.ax,v=s.v], PVA[r,a,v] == (alpha_def_va_LAB1[a]*PLAB1[r,a]^(1-sigma_v) + alpha_def_va_VA1[a]*PVA1[r,a,v]^(1-sigma_v))^(1/(1-sigma_v))
+        [r=s.r,a=adef,v=s.v], PVA[r,a,v] == (alpha_def_va_LAB1[a]*PLAB1[r,a]^(1-sigma_v) + alpha_def_va_VA1[a]*PVA1[r,a,v]^(1-sigma_v))^(1/(1-sigma_v))
         [r=s.r,a=s.acr,v=s.v], PVA1[r,a,v] == (alpha_crop_va1_ND2[a]*PND2[r,a]^(1-sigma_v1) + alpha_crop_va1_VA2[a]*PVA2[r,a,v]^(1-sigma_v1))^(1/(1-sigma_v1))
         [r=s.r,a=s.alv,v=s.v], PVA1[r,a,v] == (alpha_livestock_va1_VA2[a]*PVA2[r,a,v]^(1-sigma_v1) + alpha_livestock_va1_KEF[a]*PKEF[r,a,v]^(1-sigma_v1))^(1/(1-sigma_v1))
-        [r=s.r,a=s.ax,v=s.v], PVA1[r,a,v] == (alpha_def_va1_KEF[a]*PKEF[r,a,v]^(1-sigma_v1) + alpha_def_va1_VA2[a]*PVA2[r,a,v]^(1-sigma_v1))^(1/(1-sigma_v1))
+        [r=s.r,a=adef,v=s.v], PVA1[r,a,v] == (alpha_def_va1_KEF[a]*PKEF[r,a,v]^(1-sigma_v1) + alpha_def_va1_VA2[a]*PVA2[r,a,v]^(1-sigma_v1))^(1/(1-sigma_v1))
         [r=s.r,a=s.acr,v=s.v], PVA2[r,a,v] == (alpha_crop_va2_LAND[a]*PVA1[r,a,v]^(1-sigma_v2) + alpha_crop_va2_KEF[a]*PKEF[r,a,v]^(1-sigma_v2))^(1/(1-sigma_v2))
         [r=s.r,a=s.alv,v=s.v], PVA2[r,a,v] == (alpha_livestock_va2_LAND[a]*PVA1[r,a,v]^(1-sigma_v2) + alpha_livestock_va2_FEED[a]*PND2[r,a]^(1-sigma_v2))^(1/(1-sigma_v2))
         # (P-18)--(P-20) KEF nest
@@ -175,9 +187,9 @@ function production_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
         [r=s.r,a=s.a], PLAB1[r,a] == (sum(alpha_lab1[(a,l)]*(PFp[r,l,a]/lambda_f)^(1-sigma_ul) for l in s.ul))^(1/(1-sigma_ul))
         [r=s.r,a=s.a], PLAB2[r,a] == (sum(alpha_lab2[(a,l)]*(PFp[r,l,a]/lambda_f)^(1-sigma_sl) for l in s.sl))^(1/(1-sigma_sl))
         # (P-33)--(P-37) non-energy intermediate and water bundles
-        [r=s.r,a=s.a,i=setdiff(s.i,s.nrg)], XA[r,i,a] == alpha_io[(a,i)] * (lambda_io*PND1[r,a]/PAa[r,i,a])^sigma_n1 * ND1[r,a] / lambda_io
-        [r=s.r,a=s.a], PND1[r,a] == (sum(alpha_io[(a,i)]*(PAa[r,i,a]/lambda_io)^(1-sigma_n1) for i in setdiff(s.i,s.nrg)))^(1/(1-sigma_n1))
-        [r=s.r,a=s.a], PND2[r,a] == (sum(alpha_io2[(a,i)]*(PAa[r,i,a]/lambda_io)^(1-sigma_n2) for i in setdiff(s.i,s.nrg)))^(1/(1-sigma_n2))
+        [r=s.r,a=s.a,i=setdiff(s.i,s.nrg)], XA[r,i,a] == alpha_io[(a,i)] * (lambda_io*PND1[r,a]/PA[r,i,a])^sigma_n1 * ND1[r,a] / lambda_io
+        [r=s.r,a=s.a], PND1[r,a] == (sum(alpha_io[(a,i)]*(PA[r,i,a]/lambda_io)^(1-sigma_n1) for i in setdiff(s.i,s.nrg)))^(1/(1-sigma_n1))
+        [r=s.r,a=s.a], PND2[r,a] == (sum(alpha_io2[(a,i)]*(PA[r,i,a]/lambda_io)^(1-sigma_n2) for i in setdiff(s.i,s.nrg)))^(1/(1-sigma_n2))
         [r=s.r,a=s.a,f=s.wat], XF[r,f,a] == alpha_water_WAT[a] * (lambda_f*PWAT[r,a]/PFp[r,f,a])^sigma_wat * XWAT[r,a] / lambda_f
         [r=s.r,a=s.a], PWAT[r,a] == (sum(alpha_water[(a,f)]*(PFp[r,f,a]/lambda_f)^(1-sigma_wat) for f in s.wat))^(1/(1-sigma_wat))
         # (P-38)--(P-48) energy nests
@@ -190,10 +202,61 @@ function production_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
         [r=s.r,a=s.a,v=s.v], XAoil[r,a,v] == alpha_olg_OIL[a] * (POLG[r,a,v]/PAoil[r,a,v])^sigma_olg * XOLG[r,a,v]
         [r=s.r,a=s.a,v=s.v], XAgas[r,a,v] == alpha_olg_GAS[a] * (POLG[r,a,v]/PAgas[r,a,v])^sigma_olg * XOLG[r,a,v]
         [r=s.r,a=s.a,v=s.v], POLG[r,a,v] == (alpha_olg_OIL[a]*PAoil[r,a,v]^(1-sigma_olg) + alpha_olg_GAS[a]*PAgas[r,a,v]^(1-sigma_olg))^(1/(1-sigma_olg))
-        [r=s.r,a=s.a,v=s.v,i=s.nrg], XA[r,i,a] == alpha_energy[(a,i)] * (lambda_ep*PANRG[r,a,v]/PAa[r,i,a])^sigma_nrg * XANRG[r,a,v] / lambda_ep
-        [r=s.r,a=s.a,v=s.v], PANRG[r,a,v] == (sum(alpha_energy[(a,i)]*(PAa[r,i,a]/lambda_ep)^(1-sigma_nrg) for i in s.nrg))^(1/(1-sigma_nrg))
     end)
+
+    # (P-47)/(P-48) Armington demand for, and price of, the energy commodities.
+    #
+    # The document writes XA_{r,e,a} without a vintage index and with a Σ_v on
+    # the right-hand side (documentation p. 20, equation P-47); the previous
+    # port omitted that sum and generated one equation per (r,i,a,v), i.e. two
+    # equations for every XA instance.  Footnote 11 (p. 19) states that in the
+    # GAMS code the four energy carriers ('ely', 'coa', 'oil', 'gas') are extra
+    # dimensions of XA^NRG; those carrier bundles are exactly the XAely/XAcoa/
+    # XAoil/XAgas leaves of the P-38:P-46 nest declared above, and their price
+    # PA^a_{r,e,a} is the Armington purchaser price of the matching commodity.
+    # Implementing P-47/P-48 that way both removes the double counting and gives
+    # PAely/PAcoa/PAgas the determining equation they previously lacked; the
+    # separate XANRG/PANRG aggregate (which no equation determined) is dropped.
+    carrier_q = Dict("ELY"=>XAely, "COA"=>XAcoa, "OIL"=>XAoil, "GAS"=>XAgas)
+    carrier_p = Dict("ELY"=>PAely, "COA"=>PAcoa, "OIL"=>PAoil, "GAS"=>PAgas)
+    for i in s.nrg
+        key = _nrg_carrier_key(i)
+        key === nothing && error("Energy commodity $(i) does not map to an ENVISAGE energy carrier (ely/coa/oil/gas).")
+        Q = carrier_q[key]; P = carrier_p[key]
+        for r in s.r, a in s.a
+            @NLconstraint(m, XA[r,i,a] == sum(Q[r,a,v] for v in s.v) / lambda_ep)
+            for v in s.v
+                @NLconstraint(m, P[r,a,v] == PA[r,i,a] / lambda_ep)
+            end
+        end
+    end
+    # (P-48) Carriers with no matching commodity in this aggregation (e.g. no
+    # crude/refined oil commodity) have an inactive node in the energy nest;
+    # their price is pinned to the benchmark value 1 so the nest stays square.
+    for key in ["ELY", "COA", "OIL", "GAS"]
+        any(_nrg_carrier_key(i) == key for i in s.nrg) && continue
+        Pk = carrier_p[key]
+        for r in s.r, a in s.a, v in s.v
+            @NLconstraint(m, Pk[r,a,v] == 1.0)
+        end
+    end
     return m
+end
+
+"""
+    _nrg_carrier_key(i)
+
+Map an ENVISAGE energy commodity label to one of the document's four energy
+carriers "ELY", "COA", "OIL", "GAS" (documentation §3.2, footnote 11).
+Returns `nothing` when the label does not match a carrier.
+"""
+function _nrg_carrier_key(i::AbstractString)
+    u = uppercase(strip(String(i)))
+    (occursin("ELEC", u) || u == "ELY") && return "ELY"
+    (occursin("COAL", u) || u == "COA") && return "COA"
+    (occursin("GAS", u)) && return "GAS"
+    (occursin("OIL", u) || occursin("PETRO", u) || occursin("CRUDE", u) || occursin("REFIN", u)) && return "OIL"
+    return nothing
 end
 
 function production_residuals!(res::Dict{String,Function})
