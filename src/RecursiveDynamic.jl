@@ -22,15 +22,200 @@
 # Outputs:
 # - results/dynamic/period_<t>/...   (full static-model outputs per period)
 # - results/dynamic/time_series.csv  (key macro indicators stacked across t)
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# CAPITAL STOCK vs FLOW UNITS  (fixed 2026-09-03)
+# ─────────────────────────────────────────────────────────────────────────────
+# `PAR[:KSupply][(i,v)]` and `PAR[:K0][i]` are capital RENTAL PAYMENTS: the
+# calibration reads them straight off the SAM's CAP row (CAP_i/|v| per vintage),
+# so they are a price × quantity flow per period, not a stock.  `FDInv` (the
+# solved investment quantity, = FD["Inv"]) is a COMMODITY flow.  Adding one to
+# the other, as the previous `K[t+1] = (1−δ)K[t] + FDInv` update did, mixes
+# units: at the benchmark CAP = 17,701 while FDInv = 11,519, so `K0` jumped by a
+# factor of ~2 per period and PATH failed from period 3 on.
+#
+# The state variable is now an explicit capital STOCK in commodity units:
+#
+#   Kstock0      = FDInv0 / delta                     (aggregate; stationary at
+#                                                      the benchmark, I0 = δ·K0)
+#   share_i      = CAP_i / Σ_j CAP_j                  (benchmark rental shares)
+#   Kstock0_i    = Kstock0 · share_i
+#   kappa_i      = Σ_v KSupply0[i,v] / Kstock0_i      (rental per unit of stock,
+#                                                      constant = the benchmark
+#                                                      gross rate of return)
+#
+# Period update, with I_t the solved `FDInv` (commodity units, the same units
+# Kstock0 was defined in):
+#
+#   Kstock_{t+1,i} = (1 − delta)·Kstock_{t,i} + I_t·share_i
+#   KSupply_{t+1}[i,v] = kappa_i · Kstock_{t+1,i} · vshare_{i,v}
+#   K0_{t+1}[i]        = KSupply_{t+1}[i,"Old"]        (F-30 / F_K0 anchor)
+#
+# `vshare_{i,v}` is the benchmark vintage split of sector i's capital (0.5/0.5
+# with the current calibration, which has no vintage information in the SAM).
+# `vintage_rule = :flow` instead uses the textbook vintage reading
+# (Old = kappa·(1−δ)·Kstock_t, New = kappa·I_t·share_i, same sector total).
+# `:benchmark_shares` is the default because the two vintages are technologically
+# identical in this port (Calibration.jl gives them the same alpha_*), so the
+# textbook split adds no economics, while F-24 pins RR = 1 and therefore makes
+# F-30 fix XPv[i,"Old"] rigidly: at the (1−δ)/δ = 95/5 split XPv[i,"New"] has
+# only 5 % headroom before hitting its zero bound.  See the report for measured
+# behaviour of both rules.
+#
+# With g_labor = g_tfp = 0 the stock is stationary (Kstock_{t+1} = Kstock_t), so
+# every period reproduces the benchmark exactly.
+
+"""
+`true` when the last solve of `m` converged.  A period that hit its iteration
+limit returns whatever point PATH stopped at, which is not an equilibrium; the
+state updates below refuse to propagate such a point, so one failed period makes
+the path plateau instead of corrupting every period after it.
+"""
+function _period_converged(m)
+    try
+        return termination_status(m) in (MOI.LOCALLY_SOLVED, MOI.OPTIMAL)
+    catch
+        return false
+    end
+end
+
+"""
+Capital-stock state for the recursive dynamics, created on first use and cached
+in `data.metadata[:capital_state]`.
+
+Returns a named tuple `(stock, kappa, share, vshare, stock0, delta)` where
+`stock[i]` is sector i's capital stock in commodity units, `kappa[i]` converts
+stock to the rental payment used by `PAR[:KSupply]`/`PAR[:K0]`, `share[i]` is
+the benchmark capital share used to allocate investment, and `vshare[(i,v)]` is
+the benchmark vintage split.  See the units note at the top of this file.
+"""
+function _capital_state!(data::LinkageData; delta::Float64=0.05)
+    st = get(data.metadata, :capital_state, nothing)
+    st === nothing || return st
+
+    PAR = data.metadata[:PAR]
+    S = data.sets; i = S[:i]; v = S[:v]
+    nv = max(length(v), 1)
+
+    # Benchmark rental payments (SAM CAP row) per sector and per vintage.
+    rent = Dict{String,Float64}(ii => sum(get(PAR[:KSupply], (ii,vv), 0.0) for vv in v)
+                                for ii in i)
+    rent_tot = sum(values(rent))
+
+    # Benchmark investment in commodity units: FDInv0 = FD["Inv"] at the benchmark.
+    B = get(PAR, :bench, nothing)
+    inv0 = B isa Dict ? float(get(B, :INV, 0.0)) : 0.0
+    inv0 > 0.0 || (inv0 = float(get(PAR, :INVEST0, 0.0)))
+    (inv0 > 0.0 && delta > 0.0) ||
+        error("Cannot initialise the capital stock: need a positive benchmark investment " *
+              "(got $inv0) and a positive depreciation rate (got $delta).")
+
+    stock_tot = inv0 / delta
+    share  = Dict{String,Float64}(ii => rent_tot > 1.0e-9 ? rent[ii]/rent_tot : 1.0/length(i)
+                                  for ii in i)
+    stock  = Dict{String,Float64}(ii => stock_tot * share[ii] for ii in i)
+    kappa  = Dict{String,Float64}(ii => stock[ii] > 1.0e-12 ? rent[ii]/stock[ii] : 0.0
+                                  for ii in i)
+    vshare = Dict{Any,Float64}((ii,vv) => rent[ii] > 1.0e-12 ?
+                get(PAR[:KSupply], (ii,vv), 0.0)/rent[ii] : 1.0/nv
+                for ii in i for vv in v)
+
+    st = (stock=stock, kappa=kappa, share=share, vshare=vshare,
+          stock0=stock_tot, delta=delta)
+    data.metadata[:capital_state] = st
+    return st
+end
+
+"""
+Advance the capital stock one period from the solved model `m` and write the
+resulting rental-unit tables (`PAR[:KSupply]`, `PAR[:K0]`, `PAR[:gamma_K]`,
+`PAR[:KY0]`).  Shared by `update_period_data!` and
+`update_period_data_scenario!`; see the units note at the top of this file.
+"""
+function _update_capital_stock!(data::LinkageData, m;
+        delta::Float64=0.05, vintage_rule::Symbol=:benchmark_shares)
+
+    PAR = data.metadata[:PAR]
+    S = data.sets; i = S[:i]; v = S[:v]
+    st = _capital_state!(data; delta=delta)
+
+    inv_t = _period_converged(m) ? (try JuMP.value(m[:FDInv]) catch; missing end) : missing
+    inv_t === missing && @warn "Period did not converge; capital stock carried forward unchanged."
+    if inv_t isa Real && isfinite(inv_t)
+        use_flow = vintage_rule === :flow && ("Old" in v) && ("New" in v)
+        for ii in i
+            old_stock = st.stock[ii]
+            new_inv   = inv_t * st.share[ii]
+            new_stock = (1 - delta) * old_stock + new_inv
+            k = st.kappa[ii]
+            if use_flow
+                # Textbook vintage reading: Old = surviving capital, New = this
+                # period's investment.  Same sector total as the branch below.
+                PAR[:KSupply][(ii,"Old")] = max(k * (1 - delta) * old_stock, 1.0e-9)
+                PAR[:KSupply][(ii,"New")] = max(k * new_inv,                 1.0e-9)
+            else
+                for vv in v
+                    PAR[:KSupply][(ii,vv)] = max(k * new_stock * st.vshare[(ii,vv)], 1.0e-9)
+                end
+            end
+            # K0 is the F-30 / F_K0 anchor and is in the same rental units.
+            PAR[:K0][ii] = PAR[:KSupply][(ii, ("Old" in v) ? "Old" : first(v))]
+            st.stock[ii] = new_stock
+        end
+    end
+
+    # Aggregate rental anchor and the F-21 capital CET shares (must sum to 1).
+    PAR[:KY0] = sum(get(PAR[:KSupply], (ii,vv), 0.0) for ii in i for vv in v)
+    oldv = ("Old" in v) ? "Old" : first(v)
+    tot_k_old = sum(get(PAR[:KSupply], (ii,oldv), 0.0) for ii in i)
+    if tot_k_old > 1.0e-9
+        for ii in i
+            PAR[:gamma_K][ii] = PAR[:KSupply][(ii,oldv)] / tot_k_old
+        end
+    end
+    return data
+end
+
+"""
+Record realised sectoral labour demand in `PAR[:LV0]`.
+
+`PAR[:LV0]` is a start-value table only — no equation reads it — but
+`Initialization.jl` builds the `LV`, `LY` and (through F-10) `UE` start values
+from it.  Left at its base-year value it drifts further from the solution every
+period, and the `UE` start in particular then sits far from where F-10 puts it,
+which is the one place the dynamic path reliably trips PATH up.
+"""
+function _track_labour_demand!(data::LinkageData, m)
+    _period_converged(m) || return data
+    PAR = data.metadata[:PAR]
+    S = data.sets; i = S[:i]; l = S[:l]
+    try
+        LVv = m[:LV]
+        for ll in l, ii in i
+            val = JuMP.value(LVv[ll,ii])
+            (val isa Real && isfinite(val)) || continue
+            PAR[:LV0][(ll,ii)] = max(float(val), 0.0)
+        end
+    catch err
+        @warn "Could not record realised labour demand" exception=(err, catch_backtrace())
+    end
+    return data
+end
 
 """
 Update exogenous data fields (PAR + supplies) using period-t solution.
 This is the recursive-dynamic update step:
 
-* Capital:    K[t+1] = (1−δ)·K[t] + I[t]   where I[t] = FDInv (investment quantity)
+* Capital:    Kstock[t+1] = (1−δ)·Kstock[t] + I[t] in commodity units, converted
+              back to the rental units of `KSupply`/`K0` by `kappa` (see the
+              units note at the top of this file)
 * Labor:      LS[t+1] = (1+g_labor)·LS[t]
 * TFP:        AT[t+1] = (1+g_tfp)·AT[t]
 * Land/NR:    grow at g_land / g_nres (default 0)
+
+`vintage_rule` selects how the sector's capital is split across vintages:
+`:benchmark_shares` (default) keeps the calibrated split, `:flow` uses
+Old = surviving capital, New = this period's investment.
 
 Returns the modified `data`.
 """
@@ -39,34 +224,15 @@ function update_period_data!(data::LinkageData, m;
         g_labor::Float64=0.02,
         g_tfp::Float64=0.0,
         g_land::Float64=0.0,
-        g_nres::Float64=0.0)
+        g_nres::Float64=0.0,
+        vintage_rule::Symbol=:benchmark_shares)
 
     PAR = data.metadata[:PAR]
     S = data.sets
     i = S[:i]; l = S[:l]; v = S[:v]; gz = S[:gz]; ag = S[:ag]; h = S[:h]
 
-    # ── 1. CAPITAL ACCUMULATION (vintage update) ─────────────────────────────
-    # Proper recursive-dynamic capital flow:
-    #   K_total[t]   = K_Old[t] + K_New[t]                  (capital at start of t)
-    #   K_Old[t+1]   = (1 − δ) · K_total[t]                 (surviving capital)
-    #   K_New[t+1]   = sector_share · FDInv_t               (this period's investment)
-    # =>K_total[t+1] = (1 − δ) · K_total[t] + FDInv_t       (standard Solow update)
-    fdinv = try JuMP.value(m[:FDInv]) catch; missing end
-    if fdinv isa Real && isfinite(fdinv)
-        # Sector shares from current total capital (used to allocate investment).
-        sector_K = Dict{Any,Float64}(ii =>
-            sum(get(PAR[:KSupply], (ii,vv), 0.0) for vv in v) for ii in i)
-        total_K = sum(values(sector_K))
-        for ii in i
-            share = total_K > 1.0e-9 ? sector_K[ii] / total_K : 1.0 / length(i)
-            # All surviving capital becomes "Old" next period.
-            PAR[:KSupply][(ii,"Old")] = max((1 - delta) * sector_K[ii], 1.0e-9)
-            # New capital from this period's investment (sectoral share of FDInv).
-            PAR[:KSupply][(ii,"New")] = max(share * fdinv,             1.0e-9)
-            # K0 (static-period anchor in F_K0/F_30) equals KSupply[(i,"Old")].
-            PAR[:K0][ii] = PAR[:KSupply][(ii,"Old")]
-        end
-    end
+    # ── 1. CAPITAL ACCUMULATION (explicit stock in commodity units) ──────────
+    _update_capital_stock!(data, m; delta=delta, vintage_rule=vintage_rule)
 
     # ── 2. LABOR SUPPLY GROWTH ───────────────────────────────────────────────
     for ll in l
@@ -76,6 +242,7 @@ function update_period_data!(data::LinkageData, m;
         end
         PAR[:LY0][ll] *= (1 + g_labor)
     end
+    _track_labour_demand!(data, m)
 
     # ── 3. TOTAL FACTOR PRODUCTIVITY ─────────────────────────────────────────
     if abs(g_tfp) > 1.0e-12
@@ -110,19 +277,11 @@ function update_period_data!(data::LinkageData, m;
     end
 
     # ── 5. UPDATE AGGREGATE ANCHORS USED BY INITIALIZATION ────────────────────
-    PAR[:KY0] = sum(get(PAR[:KSupply], (ii,vv), 0.0) for ii in i for vv in v)
+    # KY0 and gamma_K are set by _update_capital_stock! above.
     # YH benchmark: factor incomes (assuming PF/W/R = 1 at next benchmark).
     PAR[:YH0] = Dict(hh => max(
         PAR[:TY0] + PAR[:FY0] + sum(values(PAR[:LY0])) + PAR[:KY0], 1.0e-9)
         for hh in h)
-
-    # Re-normalize gamma_K to preserve sum to 1
-    tot_k_old = sum(get(PAR[:KSupply], (ii,"Old"), 0.0) for ii in i)
-    if tot_k_old > 1.0e-9
-        for ii in i
-            PAR[:gamma_K][ii] = PAR[:KSupply][(ii,"Old")] / tot_k_old
-        end
-    end
 
     return data
 end
@@ -366,7 +525,8 @@ function run_recursive_dynamic!(;
         g_land::Float64=0.0,
         g_nres::Float64=0.0,
         outdir::AbstractString="results/dynamic",
-        show_solver_output::Bool=false)
+        show_solver_output::Bool=false,
+        vintage_rule::Symbol=:benchmark_shares)
 
     mkpath(outdir)
     data = init_data()
@@ -391,7 +551,7 @@ function run_recursive_dynamic!(;
         if t < periods
             update_period_data!(data, m;
                 delta=delta, g_labor=g_labor, g_tfp=g_tfp,
-                g_land=g_land, g_nres=g_nres)
+                g_land=g_land, g_nres=g_nres, vintage_rule=vintage_rule)
         end
     end
 

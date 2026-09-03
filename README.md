@@ -28,8 +28,11 @@ The model is written as a square **mixed complementarity problem (MCP)** in
   solves in ≈1 s with textbook incidence: the taxed import flow falls 1.9 %,
   its tariff-inclusive price rises 3.8 %, the exporter's FOB price falls
   3.7 %, competing sources are barely affected, real GDP falls by 1e-4 %.
-- Recursive dynamics and the policy-experiment runner run mechanically; see
-  "Known limitations" for the state of the capital-accumulation update.
+- Recursive dynamics keep an explicit capital stock (`Kstock0 = I0/δ`,
+  `K_{t+1} = (1−δ)K_t + I_t`, rental supply `KSupply = κ·K`). With zero
+  growth every period reproduces the benchmark (max change 8e-8); with TFP
+  growth alone each period solves. **Runs with labour growth still fail in
+  most periods** because of the labour closure — see "Known limitations".
 - Always check `termination_status(m)` after `solve_model!`. Now that the
   benchmark converges, an `ITERATION_LIMIT` after a shock means the shock is
   too large for a single step — apply it in smaller increments, re-solving
@@ -242,15 +245,24 @@ equations need, are documented in the header of `Calibration.jl`:
 
 ## Known limitations
 
-- **Labour closure.** F-4, F-6 and F-11 are circular, so the nominal net-wage
-  level (`AVGW`, `TW`, `NW`) is pinned only by a numerical guard; the real
-  cost side is anchored by `W = 1` (F-12). Replacing F-6 by a wage curve or
-  market-clearing condition is a modelling change that has not been made.
-- **Recursive dynamics.** `update_period_data!` treats the benchmark capital
-  supply (a rental payment) as a stock and adds investment (a commodity flow)
-  to it, so the capital stock roughly doubles per period and PATH fails from
-  period 3. Being fixed; check `termination_status` per period in
-  `results/dynamic/time_series.csv`.
+- **Labour closure.** The wage `W` is fixed at 1 (F-12) and labour supply is
+  not binding: F-10 lets unemployment `UE` absorb any gap between supply and
+  demand, and F-4, F-6, F-7 and F-11 are circular/degenerate
+  (`TW = WMIN = AVGW`, `(TW−WMIN)·UE = 0`), so once `UE` leaves its bound
+  PATH loses its footing. Consequences: `g_labor` in the dynamic runs raises
+  unemployment instead of output, and 7 of 10 periods of the default
+  10-period run end in `ITERATION_LIMIT` (non-converged periods do not update
+  the state, so the path plateaus; a warning is printed). TFP growth alone
+  solves every period. The fix is a real labour-market closure
+  (market-clearing wage, or a wage curve) in `Factors.jl`.
+- **Vintages carry no technology**: `Calibration.jl` gives Old and New capital
+  identical shares and prices, so the dynamic update keeps the benchmark
+  Old/New split (`vintage_rule=:benchmark_shares`); the flow-based split
+  (`:flow`) is available but shifts output between vintages without economic
+  content.
+- `AT` (productivity) enters P-1/P-2 as `AT·…` but P-3 as `…/AT`; the CES
+  demand form should carry `AT^(σ−1)`. Harmless at the benchmark (`AT = 1`),
+  but check before relying on TFP shocks quantitatively.
 - Zero-valued variables sit at a 1e-8 safety bound, which leaves residual
   floors of ~1e-8 on ~180 equation families; harmless for PATH.
 

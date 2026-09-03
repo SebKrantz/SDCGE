@@ -77,13 +77,18 @@ function enforce_nlp_safe_bounds_and_starts!(model; eps::Float64=LCGE_START_EPS)
 
     # Unemployment rates: UE = 0 exactly at the benchmark, and UE only ever
     # appears as (1-UE) or (1-UE)^0, so a zero lower bound is numerically safe.
+    # A start set earlier by `initialize_from_sam!` (the dynamic path, where
+    # labour supply has grown away from labour demand) is kept.
     if haskey(model, :UE)
         UE = model[:UE]
         try
             for key in eachindex(UE)
                 set_lower_bound(UE[key], 0.0)
                 set_upper_bound(UE[key], LCGE_UE_MAX)
-                set_start_value(UE[key], LCGE_UE_START)
+                sv = try start_value(UE[key]) catch; nothing end
+                if !(sv isa Real) || !isfinite(float(sv)) || float(sv) <= 0.0
+                    set_start_value(UE[key], LCGE_UE_START)
+                end
             end
         catch
         end
@@ -299,8 +304,12 @@ function initialize_from_sam!(model, data::LinkageData)
     _safe_start_value!(model, :TY, (), B[:TY])
     _safe_start_value!(model, :FY, (), B[:FY])
     _safe_start_value!(model, :KY, (), B[:KY])
+    # Y-3: LY = sum_i NW·LV, so labour income follows labour DEMAND, not supply.
+    # Identical at the benchmark (LV0 sums to LSupply there), but in a dynamic
+    # period labour supply has been grown while demand has not.
     for ll in l
-        _safe_start_value!(model, :LY, (ll,), get(PAR[:LSupply], ll, B[:LY][ll]))
+        ld = sum(get(PAR[:LV0], (ll,ii), 0.0) for ii in i)
+        _safe_start_value!(model, :LY, (ll,), ld > 0 ? ld : B[:LY][ll])
     end
 
     # ── Other final demand (Gov, Inv) ────────────────────────────────────────
@@ -319,14 +328,24 @@ function initialize_from_sam!(model, data::LinkageData)
     end
 
     # ── Labour market ────────────────────────────────────────────────────────
+    # F-10 gives UE[l,"national"]·LS = LS − Σ_i LV, so the start follows from
+    # the (exogenous) labour supply and the benchmark labour demand.  At the
+    # benchmark the two are equal and UE starts at ~0; in a dynamic period where
+    # LS0 has been grown by RecursiveDynamic/PolicyScenarios this puts UE close
+    # to its solution instead of leaving it pinned to its lower bound, which
+    # otherwise forces PATH through a basis change it handles badly.
     for ll in l
         _safe_start_value_raw!(model, :MIGR, (ll,), 0.0)
+        ls_nat = max(get(PAR[:LS0], (ll,"national"), 1.0), 1.0e-9)
+        ld_nat = sum(get(PAR[:LV0], (ll,ii), 0.0) for ii in i)
+        ue_nat = clamp(1.0 - ld_nat/ls_nat, LCGE_UE_START, LCGE_UE_MAX)
         for gg in gz
             _safe_start_value!(model, :LS,   (ll,gg), get(PAR[:LS0], (ll,gg), 1.0))
             _safe_start_value!(model, :AVGW, (ll,gg), 1.0)
             _safe_start_value!(model, :TW,   (ll,gg), 1.0)
             _safe_start_value!(model, :WMIN, (ll,gg), 1.0)
-            _safe_start_value!(model, :UE,   (ll,gg), LCGE_UE_START)
+            _safe_start_value_raw!(model, :UE, (ll,gg),
+                gg == "national" ? ue_nat : LCGE_UE_START)
         end
     end
 
@@ -410,6 +429,15 @@ function initialize_from_sam!(model, data::LinkageData)
         _safe_start_value!(model, :PS, (gg,), 1.0)
     end
     _safe_start_value!(model, :PABS, (), 1.0)
+
+    # NOTE: warm-starting the dynamic periods from the previous period's solved
+    # values was tried and removed.  It makes things worse, not better: with
+    # zero growth it took a period from 0.8 s to 30 s and ended in
+    # SLOW_PROGRESS, because the model has near-singular directions (the
+    # F-4/F-6/F-11 wage closure, see CLAUDE.md) and starting exactly on that
+    # flat manifold leaves PATH with a badly conditioned basis.  Every period
+    # therefore starts from the calibrated benchmark, rescaled through the PAR
+    # supply tables above.
 
     enforce_nlp_safe_bounds_and_starts!(model)
     return model

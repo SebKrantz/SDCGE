@@ -34,5 +34,26 @@ using DataFrames
         solve_model!(m; output="no", show_diagnostics=false)
         println("termination_status = ", termination_status(m))
         @test termination_status(m) in (MOI.LOCALLY_SOLVED, MOI.OPTIMAL)
+
+        # Recursive dynamics with zero growth must reproduce the benchmark every
+        # period: the capital stock is stationary when I = delta*K, which only
+        # holds if update_period_data! keeps stock and rental units apart.
+        # Driven directly (not through run_recursive_dynamic!) to skip the XLSX
+        # writer and keep the test fast.
+        dd = prepare_data!(init_data())
+        rgdp = Float64[]; ks = Float64[]; yg = Float64[]
+        for t in 1:2
+            md = model(dd; show_solver_output=false)
+            solve_model!(md; output="no", show_diagnostics=false)
+            @test termination_status(md) in (MOI.LOCALLY_SOLVED, MOI.OPTIMAL)
+            push!(rgdp, value(md[:RGDP]["R1"]))
+            push!(ks,   value(md[:KS]))
+            push!(yg,   value(md[:YG]))
+            t < 2 && update_period_data!(dd, md; delta=0.05, g_labor=0.0, g_tfp=0.0)
+        end
+        println("zero-growth dynamics: RGDP = ", rgdp, "  KS = ", ks)
+        @test abs(rgdp[2]/rgdp[1] - 1) < 1e-6
+        @test abs(ks[2]/ks[1]     - 1) < 1e-6
+        @test abs(yg[2]/yg[1]     - 1) < 1e-6
     end
 end

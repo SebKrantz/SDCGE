@@ -319,23 +319,16 @@ Update `data.metadata[:PAR]` from the period-`t` solve using the scenario's
 period-`t_next` exogenous values.  This is the scenario-aware version of
 `update_period_data!`.
 """
-function update_period_data_scenario!(data::LinkageData, m, scen::Scenario, t_next::Int)
+function update_period_data_scenario!(data::LinkageData, m, scen::Scenario, t_next::Int;
+        vintage_rule::Symbol=:benchmark_shares)
     PAR = data.metadata[:PAR]
     S   = data.sets
     i = S[:i]; l = S[:l]; v = S[:v]; gz = S[:gz]; ag = S[:ag]; h = S[:h]
 
-    # Capital accumulation (vintage update).
-    fdinv = try JuMP.value(m[:FDInv]) catch; missing end
-    if fdinv isa Real && isfinite(fdinv)
-        sector_K = Dict(ii => sum(get(PAR[:KSupply], (ii,vv), 0.0) for vv in v) for ii in i)
-        total_K  = sum(values(sector_K))
-        for ii in i
-            share = total_K > 1.0e-9 ? sector_K[ii] / total_K : 1.0 / length(i)
-            PAR[:KSupply][(ii,"Old")] = max((1 - scen.delta) * sector_K[ii], 1.0e-9)
-            PAR[:KSupply][(ii,"New")] = max(share * fdinv,                  1.0e-9)
-            PAR[:K0][ii]              = PAR[:KSupply][(ii,"Old")]
-        end
-    end
+    # Capital accumulation: explicit stock in commodity units, converted back to
+    # the rental units of KSupply/K0.  Shared with update_period_data!; see the
+    # units note at the top of RecursiveDynamic.jl.
+    _update_capital_stock!(data, m; delta=scen.delta, vintage_rule=vintage_rule)
 
     # Labor supply per skill: use scenario growth rates.
     for ll in l
@@ -346,6 +339,7 @@ function update_period_data_scenario!(data::LinkageData, m, scen::Scenario, t_ne
         end
         PAR[:LY0][ll] *= (1 + g)
     end
+    _track_labour_demand!(data, m)
 
     # Productivity AT per activity: scenario provides absolute LEVELS, not growth.
     # PAR[:AT][i] is replaced with the period-t_next level (1.0 = baseline).
@@ -380,17 +374,10 @@ function update_period_data_scenario!(data::LinkageData, m, scen::Scenario, t_ne
         PAR[:FY0] *= (1 + n_t)
     end
 
-    # Update aggregate anchors.
-    PAR[:KY0] = sum(get(PAR[:KSupply], (ii,vv), 0.0) for ii in i for vv in v)
+    # Update aggregate anchors (KY0 and gamma_K are set by _update_capital_stock!).
     PAR[:YH0] = Dict(hh => max(
         PAR[:TY0] + PAR[:FY0] + sum(values(PAR[:LY0])) + PAR[:KY0], 1.0e-9)
         for hh in h)
-    tot_k_old = sum(get(PAR[:KSupply], (ii,"Old"), 0.0) for ii in i)
-    if tot_k_old > 1.0e-9
-        for ii in i
-            PAR[:gamma_K][ii] = PAR[:KSupply][(ii,"Old")] / tot_k_old
-        end
-    end
     return data
 end
 
