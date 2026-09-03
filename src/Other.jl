@@ -27,13 +27,18 @@ function add_other_equations!(model, data::LinkageData, PAR)
 
     # Stub equations for GOVDEM and INVDEM (government and investment demand by good).
     # These equal the fixed-coefficient breakdowns of aggregate final demand FD[gov/inv].
-    # a_f[i,f] gives the share of good i in final demand category f (from PAR).
+    # D_8 (Demand.jl) already applies a_f[i,f] to get XAf[ii,ff] = a_f[(ii,ff)]*FD[ff],
+    # so GOVDEM/INVDEM should just read off the corresponding XAf column directly.
+    # The previous formula re-multiplied by a_f[(ii,gov/inv)] AND summed XAf over
+    # every category ff in f (not just gov/inv), double-applying the gov/inv share
+    # and mixing in the other category's demand -- a large, spurious residual
+    # source (up to ~143 for M_INVDEM, ~93 for M_GOVDEM at the benchmark start).
     gov = ("Gov" in f) ? "Gov" : first(f)
     inv = ("Inv" in f) ? "Inv" : last(f)
     @constraint(model, M_GOVDEM[ii in i],
-        (GOVDEM[ii]) - (PAR[:a_f][(ii,gov)] * sum(XAf[ii,ff] for ff in f)) ⟂ GOVDEM[ii])
+        (GOVDEM[ii]) - (XAf[ii,gov]) ⟂ GOVDEM[ii])
     @constraint(model, M_INVDEM[ii in i],
-        (INVDEM[ii]) - (PAR[:a_f][(ii,inv)] * sum(XAf[ii,ff] for ff in f)) ⟂ INVDEM[ii])
+        (INVDEM[ii]) - (XAf[ii,inv]) ⟂ INVDEM[ii])
 
     # PAp off-diagonal wedge: PAp[j,i] = (1+tau_Ap[j,i]) * PA[j] for j ≠ i.
     # (Diagonal already handled by P_aux_PAp_wedge in Production.jl.)

@@ -1,8 +1,0 @@
-metric,value
-variables,164477
-constraints_total,269577
-complementarity_constraints,148109
-equation_variable_matches,0
-variables_without_equations,164477
-variables_with_multiple_equations,0
-likely_redundant_equations,0

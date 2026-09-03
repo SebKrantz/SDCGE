@@ -215,7 +215,13 @@ function precompute_parameters(data::LinkageData)
     _fill!(PAR, :beta_xd, i, 0.5)
     _fill!(PAR, :beta_es, i, 0.5)
     _fill!(PAR, :sigma_z, i, 0.5)
-    _fill!(PAR, :beta_z, [(rr,rrp,ii) for rr in r for rrp in rp for ii in i], 1.0/length(rp))
+    # beta_z must sum to 1 over the FULL (rr,rrp) grid, not just over rrp: T_19
+    # (Trade.jl) is a single flat CET dual price nest summing beta_z over both
+    # rr and rrp together (sum(sum(...for rrp in rp) for rr in r)), and T_18's
+    # bilateral CET supply split allocates one scalar ES[ii] across every
+    # (rr,rrp) pair. 1/length(rp) (summing to length(r), not 1) left T_19's
+    # price identity off by length(r)^(1/(1+sigma_z2)) at the benchmark.
+    _fill!(PAR, :beta_z, [(rr,rrp,ii) for rr in r for rrp in rp for ii in i], 1.0/(length(r)*length(rp)))
     _fill!(PAR, :sigma_z2, i, 0.5)
     _fill!(PAR, :tau_pr, [(rr,rrp,ii) for rr in r for rrp in rp for ii in i], 0.0)
     _fill!(PAR, :tau_in, [(rr,rrp,ii) for rr in r for rrp in rp for ii in i], 0.0)

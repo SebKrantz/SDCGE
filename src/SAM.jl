@@ -153,7 +153,7 @@ function read_sam_csv!(data::LinkageData, path::AbstractString)
         x = raw[r+1,c+1]
         mat[r,c] = x isa Number ? Float64(x) : parse(Float64, strip(string(x)))
     end
-    set_sam!(data, collect(row_accounts), mat)
+    set_sam!(data, String.(row_accounts), mat)
     return data
 end
 
@@ -182,7 +182,7 @@ function read_sam_excel!(data::LinkageData, path::AbstractString; sheet::Abstrac
         x = raw[r+1,c+1]
         mat[r,c] = x isa Number ? Float64(x) : parse(Float64, strip(string(x)))
     end
-    set_sam!(data, collect(row_accounts), mat)
+    set_sam!(data, String.(row_accounts), mat)
     return data
 end
 

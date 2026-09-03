@@ -53,14 +53,44 @@ end
 function _lcge_index_string(idx)
     if idx isa Tuple
         return join(string.(idx), "|")
+    elseif idx isa CartesianIndex
+        return join(string.(Tuple(idx)), "|")
     else
         return string(idx)
     end
 end
 
-function _lcge_collect_variable_rows!(rows::Vector{Vector{Any}}, name::Symbol, obj)
+# Map a container position (as returned by `eachindex`) to its axis labels.
+# DenseAxisArray positions are CartesianIndex/Int; SparseAxisArray keys are
+# already the label tuples.
+function _lcge_index_label(obj, idx)
+    if hasproperty(obj, :axes)
+        ax = obj.axes
+        try
+            if idx isa CartesianIndex
+                return join((string(ax[d][idx[d]]) for d in 1:length(idx)), "|")
+            elseif idx isa Integer && length(ax) == 1
+                return string(ax[1][idx])
+            end
+        catch
+        end
+    end
+    return _lcge_index_string(idx)
+end
+
+# True once optimize! has been called; querying values before that emits one
+# JuMP warning per variable, so callers skip value lookups instead.
+function _lcge_has_solution(m)
+    try
+        return JuMP.termination_status(m) != JuMP.MOI.OPTIMIZE_NOT_CALLED
+    catch
+        return false
+    end
+end
+
+function _lcge_collect_variable_rows!(rows::Vector{Vector{Any}}, name::Symbol, obj; solved::Bool=true)
     if obj isa JuMP.VariableRef
-        val = _lcge_value(obj)
+        val = solved ? _lcge_value(obj) : missing
         start = _lcge_start_value(obj)
         diff = (val === missing || start === missing) ? missing : val - start
         pct = (val === missing || start === missing || abs(start) <= 1.0e-12) ? missing : 100.0 * (val - start) / start
@@ -74,11 +104,11 @@ function _lcge_collect_variable_rows!(rows::Vector{Vector{Any}}, name::Symbol, o
         for idx in eachindex(obj)
             var = obj[idx]
             if var isa JuMP.VariableRef
-                val = _lcge_value(var)
+                val = solved ? _lcge_value(var) : missing
                 start = _lcge_start_value(var)
                 diff = (val === missing || start === missing) ? missing : val - start
                 pct = (val === missing || start === missing || abs(start) <= 1.0e-12) ? missing : 100.0 * (val - start) / start
-                push!(rows, Any[string(name), _lcge_index_string(idx), val, start, diff, pct])
+                push!(rows, Any[string(name), _lcge_index_label(obj, idx), val, start, diff, pct])
             end
         end
     catch
@@ -99,8 +129,9 @@ Columns:
 """
 function results_dataframe(m)
     rows = Vector{Vector{Any}}()
+    solved = _lcge_has_solution(m)
     for (name, obj) in object_dictionary(m)
-        _lcge_collect_variable_rows!(rows, name, obj)
+        _lcge_collect_variable_rows!(rows, name, obj; solved=solved)
     end
     return DataFrame(
         variable = [r[1] for r in rows],
@@ -132,9 +163,10 @@ end
 
 function _lcge_scalar_rows(m)
     rows = Vector{Vector{Any}}()
+    solved = _lcge_has_solution(m)
     for (name, obj) in object_dictionary(m)
         if obj isa JuMP.VariableRef
-            push!(rows, Any[string(name), _lcge_value(obj), _lcge_start_value(obj)])
+            push!(rows, Any[string(name), solved ? _lcge_value(obj) : missing, _lcge_start_value(obj)])
         end
     end
     return rows

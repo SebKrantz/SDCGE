@@ -1,251 +1,281 @@
-# LCGE-V4 — Economy-Wide Policy Simulation Model
+# LCGE-V4 — LINKAGE-style economy-wide policy simulation model
 
-LCGE-V4 is a Julia package that simulates how policy changes ripple through an entire economy. It models 100 sectors (agriculture, energy, manufacturing, services, and more) and finds the new equilibrium after a shock — showing you what happens to prices, production, employment, trade, and household income all at once.
+LCGE-V4 is a Julia implementation of a LINKAGE-style computable general
+equilibrium (CGE) model: 100 sectors, 4 regions, two labour skills with
+rural–urban migration, old/new capital vintages, nested Armington/CET trade
+with tariff-rate quotas, and a recursive-dynamic extension. It simulates how a
+policy change (a tariff, a productivity shock, labour growth, …) ripples
+through prices, production, employment, trade and household income.
+
+The model is written as a square **mixed complementarity problem (MCP)** in
+[JuMP](https://jump.dev) and solved with the **PATH** solver.
+
+> **Sibling branch.** The `envcge-v9` branch of this repository holds an
+> unrelated model (EnvCGE V9, an ENVISAGE-style climate CGE). The two share no
+> code or history; do not merge them.
 
 ---
 
-## What problem does this solve?
+## Current status (2026-09-03)
 
-Suppose a government raises import tariffs on fertilizer. That change affects:
-- Farming costs → farm output prices → food prices for households
-- Household budgets → savings and government tax revenue
-- Export competitiveness → trade balances
+Please read this before trusting any number the model produces.
 
-Tracing all those knock-on effects by hand is impossible. This model solves thousands of equations simultaneously to find the new equilibrium where supply meets demand in every market.
+- The default synthetic economy prepares, balances and builds correctly:
+  216-account SAM, 48,099 variables = 48,099 complementarity constraints.
+- **The benchmark solve does not currently converge.** A correctly
+  calibrated benchmark is an equilibrium by construction (all equation
+  residuals ≈ 0 at the start values). Here PATH starts from a residual of
+  ≈6.1e3, stops at its iteration limit and reports
+  `termination_status = ITERATION_LIMIT`, `primal_status = UNKNOWN_RESULT_STATUS`.
+  Until this is fixed, shocks, dynamic runs and policy experiments run
+  mechanically but their results are not meaningful.
+- What has been fixed (2026-09-03): bilateral-trade start values are now
+  derived from the aggregate imports/exports and the share parameters
+  (`T-5…T-27` residuals ≈ 0), domestic-supply/export split uses the calibrated
+  shares (`T-14`), land supply (`F-13`), the `beta_z` normalisation (`T-19`)
+  and a double-applied share in `M_GOVDEM`/`M_INVDEM`.
+- What remains (largest start residuals first, see `diagnose_model`):
+  household Armington/bundle shares `GammaC`, `alpha_dc/mc/df/mf` are uniform
+  defaults, not calibrated from the SAM (`D-5`, `D-10…D-13`); per-vintage
+  production-nest start values use hard-coded fractions instead of the
+  calibrated `alpha_*` (`P_*`, e.g. `P_67`); government revenue `C-3` cannot
+  match because `tau_l/t/k/Ac/Af`, `kappa_h`, `pi` default to 0 while `YG` is
+  calibrated as total SAM tax revenue; and the CET aggregator `T-16` is
+  inconsistent with the value-share calibration of `beta_xd/beta_es`
+  (needs a different CET parameterisation). These need modelling decisions,
+  not just code fixes.
+- Always check `termination_status(m)` after `solve_model!` — a run that
+  "completes" is not the same as one that converged. `diagnose_model(m)`
+  now reports each equation's residual at the start point
+  (`residual_at_start`), which is the right metric to watch while fixing the
+  calibration.
 
 ---
 
-## Before you start
+## Requirements
 
-You need two things installed before running anything.
+| Requirement | Notes |
+|---|---|
+| Julia ≥ 1.10 | `Manifest.toml` was resolved with 1.11; tested on 1.12.4 |
+| PATH licence | A public courtesy licence is built in (valid to 31 Dec 2035). Set `PATH_LICENSE_STRING` to override it. |
 
-### 1. Install Julia
+Julia packages (installed automatically by `Pkg.instantiate()`):
 
-Download from [julialang.org](https://julialang.org/downloads/). Version **1.9 or newer** is required. After installing, you should be able to open a terminal and type `julia` to start it.
-
-### 2. Get a PATH Solver license
-
-This model uses a specialized solver called **PATH** to find equilibria. It is free for academic use.
-
-Follow the setup steps at the [PATHSolver.jl repository](https://github.com/chkwon/PATHSolver.jl) to obtain and install your license key. The license is set as an environment variable called `PATH_LICENSE_STRING`.
-
-If you skip this step, you will get a license error when you try to solve.
+| Package | Purpose |
+|---|---|
+| `JuMP`, `PATHSolver`, `Complementarity` | MCP formulation and PATH solver interface |
+| `DataFrames` | Results tables |
+| `XLSX` | Excel SAM input, dynamic/scenario workbooks |
+| `Plots` | Optional charts of results and trajectories |
 
 ---
 
 ## Installation
 
-Open a terminal, navigate to this folder, and start Julia:
-
-```
-julia
-```
-
-Then run:
-
-```julia
-using Pkg
-Pkg.activate(".")
-Pkg.instantiate()
+```bash
+git clone https://github.com/SebKrantz/SDCGE
+cd SDCGE
+julia --project=. -e 'using Pkg; Pkg.instantiate()'
 ```
 
-This downloads all required libraries (JuMP, PATHSolver, DataFrames, XLSX, Complementarity). It only needs to be done once.
+The first `instantiate` precompiles JuMP and Plots and can take 5–15 minutes.
 
 ---
 
-## Your first run (5 lines)
+## Quick start
 
 ```julia
 include("src/LinkageModel.jl")
 using .LinkageModel
+using JuMP
 
-data = init_data()       # Step 1: create a blank data container
-prepare_data!(data)      # Step 2: load the built-in example economy and calibrate it
-m = model(data)          # Step 3: build the model equations
-solve_model!(m)          # Step 4: find the equilibrium
-export_results!(m, data) # Step 5: save results to the results/ folder
+data = init_data()        # empty data container
+prepare_data!(data)       # built-in synthetic 100-sector SAM → balance → calibrate
+m = model(data)           # build the JuMP/PATH model (~15 s)
+solve_model!(m)           # solve with PATH (~75 s)
+termination_status(m)     # check this! see "Current status"
+export_results!(m, data)  # write results/*.csv
 ```
 
-The package ships with a synthetic 100-sector economy, so you can run this immediately without any external data files. Results appear as CSV files in the `results/` folder.
-
-**One-line shortcut** that does all five steps:
+One-call equivalent (results are only written if you ask for them):
 
 ```julia
-include("src/LinkageModel.jl")
-using .LinkageModel
-m, data = run_linkage!()
+m, data = run_linkage!(write_results=true)
 ```
+
+Rough timings on a laptop: `include` 7 s, `prepare_data!` 6 s, `model` 14 s,
+`solve_model!` ≈ 75 s.
 
 ---
 
-## Understanding the output
+## Output
 
-After solving, the `results/` folder contains:
+`export_results!(m, data)` writes to `results/` (git-ignored):
 
 | File | Contents |
-|------|----------|
-| `results_all_variables.csv` | Every model variable — solution value, starting value, and percentage change |
-| `results_XP.csv` | Gross output by sector |
-| `results_GDP.csv` | GDP by region |
-| `results_YH.csv` | Household income |
-| `results_YD.csv` | Disposable income |
-| `results_YC.csv` | Consumption expenditure |
-| `results_SAV.csv` | Household saving |
-| `results_GOVREV.csv` | Government revenue |
-| `results_metadata.csv` | Solver status and timestamp |
-| `sam_balance_table.csv` | SAM row/column balance diagnostics |
+|---|---|
+| `results_all_variables.csv` | Every variable element: value, start value, change, % change |
+| `results_summary.csv` | Named macro indicators (GDP, CPI, household income, government revenue `YG`, investment, savings, …) |
+| `results_scalars.csv` | Scalar variables |
+| `results_<VAR>.csv` | One file per major variable container, e.g. `results_XP.csv`, `results_GDP.csv`, `results_YH.csv`, `results_YG.csv` |
+| `results_metadata.csv` | Solver termination/primal status and timestamp |
+| `balanced_sam.csv`, `sam_balance_table.csv`, `sam_balance_summary.csv` | The RAS-balanced SAM and its row/column gaps |
 
-You can also get results as a Julia table without saving files:
-
-```julia
-df = results_dataframe(m, data)
-```
-
-The `pct_change_from_start` column in the results shows the percentage change from the baseline for each variable. A value of `5.0` means the variable increased by 5% relative to the calibrated benchmark.
+In Julia, `results_dataframe(m)` returns the same table as
+`results_all_variables.csv`. `pct_change_from_start` is the change relative
+to the calibrated start value.
 
 ---
 
-## Using your own economy data
+## Using your own SAM
 
-The model reads its economy from a **Social Accounting Matrix (SAM)** — a square table recording all money flows between sectors, households, government, and the rest of the world for a base year.
-
-### Option A: Load from a CSV file
-
-Your CSV must have account labels in the first row and first column. The package expects **406 accounts** in the standard order (activities, commodities, factors, taxes, institutions, margins).
-
-```julia
-data = init_data()
-prepare_data!(data;
-    source        = :csv,
-    sam_path      = "data/csv/sam.csv",
-    accounts_path = "data/csv/sam_accounts.csv",
-    sets_path     = "data/csv/sets.csv"
-)
-m = model(data)
-solve_model!(m)
-```
-
-### Option B: Load from an Excel file
+The economy is defined by a square Social Accounting Matrix with **216
+accounts** in the standard order (100 activities, 100 commodities, factors,
+taxes, institutions, margins); see `data/csv/sam_accounts.csv`. The SAM is
+RAS-balanced automatically and the balance report is written next to the
+results.
 
 ```julia
-data = init_data()
-prepare_data!(data;
-    source     = :excel,
-    sam_path   = "data/linkage_100sector_data.xlsx"
-)
+# CSV: first row / first column hold the account labels
+data = prepare_data!(init_data(); source=:csv, sam_path="data/csv/sam.csv")
+
+# Excel: sheet "SAM" of the workbook
+data = prepare_data!(init_data(); source=:excel, sam_path="data/linkage_100sector_data.xlsx")
+
 m = model(data)
-solve_model!(m)
 ```
 
-The package automatically checks and balances your SAM before calibrating. Balancing diagnostics are written to `results/sam_balance_table.csv` — check this file if you are unsure whether your SAM is suitable.
+`examples/02_read_csv_sam.jl` and `03_read_excel_sam.jl` show the explicit
+step-by-step version (`read_sam_csv!` → `validate_sam!` → `balance_sam_ras!`
+→ `calibrate_from_sam!`).
 
 ---
 
 ## Applying a policy shock
 
-To simulate a policy change, modify the calibrated parameters **after** `prepare_data!` and **before** `model(data)`.
-
-**Example: increase the import tariff on commodity P001 between regions R1 and R2 to 20%**
+All calibrated parameters live in `parameters(data)` (a `Dict{Symbol,Any}`,
+stored in `data.metadata[:PAR]`). Modify them after `prepare_data!` and before
+`model`:
 
 ```julia
-data = init_data()
-prepare_data!(data)
-
-# Change one tariff rate in the precomputed parameter table
-data.metadata[:PAR][:tau_m][("R1", "R2", "P001")] = 0.20
-
-m = model(data)   # builds the model with the new tariff
+data = prepare_data!(init_data())
+PAR = parameters(data)
+PAR[:tau_m][("R1", "R2", "P001")] = 0.20   # import tariff, index (r, rp, product)
+m = model(data)
 solve_model!(m)
-export_results!(m, data)
 ```
 
-All calibrated parameters live in `data.metadata[:PAR]`. Common ones to modify:
+Commonly used entries:
 
-| Parameter | Description | Index |
-|-----------|-------------|-------|
-| `tau_m` | Import tariff rate | `(destination, origin, product)` |
-| `tau_e` | Export tax rate | `(origin, destination, product)` |
-| `tau_p` | Output tax rate | `(product)` |
-| `AT` | Total factor productivity | `(product)` |
-| `LSupply` | Labor supply | `("UnSkLab")` or `("SkLab")` |
+| Key | Description | Index |
+|---|---|---|
+| `:tau_m`, `:tau_e` | Import tariff / export tax rate | `(r, rp, product)` |
+| `:tau_p` | Output tax rate | `product` |
+| `:AT` | Total factor productivity | `product` |
+| `:LSupply` | Labour supply | `"UnSkLab"` or `"SkLab"` |
+| `:KSupply` | Capital supply | `(product, vintage)` |
 
 ---
 
-## Step-by-step example scripts
-
-The `examples/` folder contains runnable scripts:
-
-| Script | What it shows |
-|--------|---------------|
-| `01_prepare_data.jl` | Load and balance a SAM |
-| `02_build_model_path.jl` | Build the model without solving |
-| `05_solve_with_path.jl` | Solve and save results |
-| `06_solve_export_results_and_plot.jl` | Full run with charts |
-
-Run any script from the terminal:
-
-```
-julia examples/01_prepare_data.jl
-```
-
----
-
-## Checking that the model built correctly
-
-Before solving, you can print a quick health check:
+## Recursive dynamics and policy experiments
 
 ```julia
-print_model_diagnostics(m)
+# 10 periods; each period is one static solve, then K, L and A are updated
+data, history, snapshots = run_recursive_dynamic!(periods=10, delta=0.05,
+                                                  g_labor=0.02, g_tfp=0.015,
+                                                  outdir="results/dynamic")
+plot_dynamic_results("results/dynamic/dynamic_results.xlsx")
+
+# Excel-driven batch of scenarios (one sheet per exogenous block)
+write_policy_template("data/policy_experiments.xlsx"; periods=10, n_scenarios=10)
+results = run_policy_experiments!("data/policy_experiments.xlsx";
+                                  outdir="results/scenarios", make_plots=true)
 ```
 
-This shows the number of variables and constraints. For the 100-sector model you should see several thousand of each. If the counts are much lower than expected, something went wrong during the build step.
+See `examples/07_recursive_dynamics.jl` and `08_policy_experiments.jl`.
 
 ---
 
-## Common problems and fixes
+## Examples and tests
 
-**"PATH license not found" or license error**
-: Set the `PATH_LICENSE_STRING` environment variable before starting Julia. See the [PATHSolver.jl README](https://github.com/chkwon/PATHSolver.jl) for instructions.
+`examples/` contains nine numbered scripts from data preparation to the full
+dynamic/policy pipeline; see `examples/README.md` for the list and runtimes.
 
-**Solver reports "Did not converge" or status is not `OPTIMAL`**
-: The starting point may be too far from a valid solution. Check that your SAM is balanced (`results/sam_balance_table.csv`), and that parameter values are realistic. Try running with the default synthetic SAM first to confirm the base model works.
+```bash
+julia examples/04_build_model.jl          # build only, prints variable/constraint counts
+julia --project=. test/runtests.jl        # smoke test: SAM, CSV import, build, results labels (~1 min)
+LCGE_TEST_SOLVE=true julia --project=. test/runtests.jl   # additionally solve (currently fails, see status)
+```
 
-**"SAM is not balanced" error**
-: Your input SAM has row totals that differ from column totals. The package runs RAS balancing automatically, but if the imbalances are very large the result may not be meaningful. Check your data source.
+---
 
-**Very slow solve or PATH runs for many iterations**
-: Large parameter changes (e.g., a tariff jumping from 0% to 100%) can make the problem hard to solve from a benchmark starting point. Try a smaller shock first, or use the previous solution as a starting point for a larger shock.
+## Diagnostics
+
+```julia
+print_model_diagnostics(m)   # variable/constraint counts and solver
+diagnose_model(m)            # equation ↔ variable matching report in results/diagnostics/
+```
+
+---
+
+## Troubleshooting
+
+**`termination_status(m)` is `ITERATION_LIMIT`, not `LOCALLY_SOLVED`** —
+see "Current status". This is the state of the shipped benchmark; a
+`pct_change_from_start` far from zero is a symptom of the failed solve, not an
+economic result.
+
+**PATH licence error** — set `PATH_LICENSE_STRING` before starting Julia
+(see [PATHSolver.jl](https://github.com/chkwon/PATHSolver.jl)); by default the
+built-in courtesy licence is used.
+
+**`SAM is not balanced`** — RAS balancing is applied automatically; large
+residual gaps in `results/sam_balance_table.csv` mean the input SAM is
+inconsistent.
+
+**`MethodError` when reading a SAM** — make sure the CSV/Excel file has
+exactly the 216 accounts listed in `data/csv/sam_accounts.csv`, in that order.
 
 ---
 
 ## Project layout
 
 ```
-LCGE-V4/
-├── src/             Model source code — do not edit unless modifying the model
-├── data/            Example economy data (SAM in Excel and CSV formats)
-├── examples/        Runnable walkthrough scripts — start here
-├── results/         Output files created after each run
-├── docs/            Technical notes and equation-coverage audits
-└── Project.toml     Julia dependency list (managed automatically)
+SDCGE/  (branch main)
+├── src/
+│   ├── LinkageModel.jl     module entry point; include order and exports
+│   ├── Types.jl            LinkageData container, default_sets!
+│   ├── SAM.jl              SAM accounts, synthetic SAM, CSV/Excel readers, RAS balancing
+│   ├── Calibration.jl      calibrate_from_sam!
+│   ├── ParameterTables.jl  precompute_parameters → PAR dictionary
+│   ├── Functions.jl        CES / CET / Armington helper functions
+│   ├── Initialization.jl   start values and bounds for all variables
+│   ├── Variables.jl        @variables declarations
+│   ├── Production.jl, Income.jl, Demand.jl, Trade.jl, Equilibrium.jl,
+│   │   Closure.jl, Factors.jl, Other.jl   paper-numbered equation blocks (P-, Y-, D-, T-, E-, C-, F-)
+│   ├── ModelBuilder.jl     prepare_data!, model/build_model, solve_model!, run_linkage!
+│   ├── Results.jl          results_dataframe, export_results!
+│   ├── Plotting.jl         plot_results, plot_dynamic_results, plot_all_scenarios
+│   ├── Diagnostics.jl      diagnose_model, print_equation_diagnostics
+│   ├── RecursiveDynamic.jl run_recursive_dynamic!
+│   └── PolicyScenarios.jl  write_policy_template, run_policy_experiments!
+├── data/                   synthetic SAM (CSV + Excel), policy_experiments.xlsx template
+├── examples/               numbered walkthrough scripts (start here)
+├── test/runtests.jl        smoke test
+└── results/                generated output (git-ignored)
 ```
-
-You only need to interact with:
-- `data/` — to supply your own SAM
-- `examples/` — to run the model
-- `results/` — to read the output
 
 ---
 
 ## What the model covers
 
 | Feature | Detail |
-|---------|--------|
-| Sectors | 100 (crops P001–P010, livestock P011–P020, energy P071–P075, industry and services P021–P100) |
-| Regions | 4 |
-| Labor types | Unskilled and skilled, with rural/urban zones and migration |
-| Capital | Old (installed) and new (investment), with sector-specific allocation |
-| Trade | Nested import demand (Armington), export allocation (CET), tariff-rate quotas |
-| Government | Output, intermediate, trade, factor, and income taxes; fiscal balance |
-| Households | Full income distribution and consumption demand system (ELES/AIDADS) |
-| Dynamics | Productivity growth, population, capital accumulation (optional multi-period) |
+|---|---|
+| Sectors | 100 (crops P001–P010, livestock P011–P020, energy P071–P075, fertiliser P076–P078, other industry and services) |
+| Regions | 4 (`R1`–`R4`) with bilateral trade |
+| Labour | Unskilled and skilled, rural/urban zones, migration |
+| Capital | Old (installed) and new (investment) vintages |
+| Trade | Nested Armington import demand, CET export supply, tariff-rate quotas |
+| Government | Output, intermediate, trade, factor and income taxes; fiscal balance |
+| Households | One representative household; ELES/AIDADS-style demand system |
+| Dynamics | Recursive: capital accumulation, labour growth, productivity growth |

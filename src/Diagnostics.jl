@@ -1,11 +1,21 @@
 # Diagnostics for LINKAGE/JuMP MCP models.
 #
-# The earlier version tried to discover the variable matched to each equation by
-# parsing the printed constraint text after the unicode complementarity symbol.
-# That is unreliable because JuMP/Complementarity may store MCP constraints as
-# MOI.Complements objects whose printed form does not contain `⟂`.  This version
-# inspects the MathOptInterface constraint function directly and uses the second
-# component of each MOI.Complements constraint as the matched variable.
+# An earlier version tried to discover the variable matched to each equation by
+# parsing the printed constraint text after the unicode complementarity symbol,
+# and a subsequent version tried to walk MathOptInterface's own VectorAffine/
+# VectorQuadratic/VectorNonlinear function representations (output_index-tagged
+# terms).  Both failed to extract anything for this JuMP 1.30 / PATHSolver 1.7
+# stack because `JuMP.constraint_object(c)` for an `F ⟂ x` constraint already
+# returns the *JuMP-level* function: a plain `Vector` of length 2k of JuMP
+# scalar expressions (`AffExpr`, `QuadExpr`, or `NonlinearExpr`), indexed
+# positionally — component `row` is the residual `F` and component `k+row` is
+# the complementary variable `x` (verified empirically: k=1 for every
+# complementarity constraint in this model, i.e. each is a plain scalar
+# `F[idx] ⟂ x[idx]`). MOI's `output_index`-tagged term scheme, which the
+# earlier version assumed, does not apply to this positional representation.
+# This version walks the JuMP expression tree directly (`GenericAffExpr.terms`,
+# `GenericQuadExpr.aff`/`.terms`, `GenericNonlinearExpr.args`) to recover the
+# variable(s) referenced by each side.
 #
 # Main entry points:
 #   diagnose_model(m; outdir="results/diagnostics")
@@ -58,65 +68,45 @@ function _diag_var_lookup(m)
 end
 
 # -----------------------------------------------------------------------------
-# Generic MOI-function variable extraction
+# JuMP-expression variable extraction
+#
+# `JuMP.constraint_object(c).func` for a Complements constraint is a plain
+# `Vector` of JuMP scalar expressions (not an MOI VectorAffineFunction/etc with
+# output_index-tagged terms), so recovering the variable(s) referenced by a
+# component just means walking that expression's own JuMP fields.
 # -----------------------------------------------------------------------------
 
-function _diag_push_var!(acc::Set{String}, v::MOI.VariableIndex)
-    push!(acc, string(v))
+function _diag_scalar_vars!(acc::Vector{JuMP.VariableRef}, x)
+    if x isa JuMP.VariableRef
+        push!(acc, x)
+    elseif x isa JuMP.GenericAffExpr
+        for v in keys(x.terms)
+            push!(acc, v)
+        end
+    elseif x isa JuMP.GenericQuadExpr
+        _diag_scalar_vars!(acc, x.aff)
+        for p in keys(x.terms)
+            push!(acc, p.a)
+            push!(acc, p.b)
+        end
+    elseif x isa JuMP.GenericNonlinearExpr
+        for a in x.args
+            _diag_scalar_vars!(acc, a)
+        end
+    end
     return acc
 end
 
-function _diag_collect_vars!(acc::Set{String}, x; output_index::Union{Nothing,Int}=nothing)
-    x isa Number && return acc
-    x isa AbstractString && return acc
-    x isa Symbol && return acc
-    x isa MOI.VariableIndex && return _diag_push_var!(acc, x)
+"""Every JuMP variable referenced by a scalar JuMP expression (AffExpr, QuadExpr, or NonlinearExpr)."""
+_diag_scalar_vars(x) = unique(_diag_scalar_vars!(JuMP.VariableRef[], x))
 
-    # Vector affine/quadratic terms carry their row/component separately.  For a
-    # complementarity constraint the equation residual is usually component 1 and
-    # the complementarity variable is component 2.
-    if hasproperty(x, :output_index)
-        oi = getproperty(x, :output_index)
-        output_index !== nothing && oi != output_index && return acc
-        if hasproperty(x, :scalar_term)
-            return _diag_collect_vars!(acc, getproperty(x, :scalar_term); output_index=nothing)
-        end
+"""Evaluate a scalar JuMP expression using each variable's JuMP start value (0.0 if unset)."""
+function _diag_eval_at_start(x)
+    try
+        return JuMP.value(v -> (sv = JuMP.start_value(v); sv === nothing ? 0.0 : Float64(sv)), x)
+    catch
+        return NaN
     end
-
-    for p in (:variable, :variable_1, :variable_2)
-        if hasproperty(x, p)
-            _diag_collect_vars!(acc, getproperty(x, p); output_index=nothing)
-        end
-    end
-
-    # Common MOI containers.  Keep this property-based so it works across JuMP
-    # versions and for affine, quadratic, and nonlinear vector functions.
-    for p in (:terms, :affine_terms, :quadratic_terms, :rows)
-        if hasproperty(x, p)
-            for y in getproperty(x, p)
-                _diag_collect_vars!(acc, y; output_index=output_index)
-            end
-        end
-    end
-
-    # Nonlinear functions may use fields named head/args or expressions with
-    # args.  We only recurse into obvious iterable argument lists, not into all
-    # fields, to avoid walking internal model objects.
-    for p in (:args, :arguments)
-        if hasproperty(x, p)
-            for y in getproperty(x, p)
-                _diag_collect_vars!(acc, y; output_index=output_index)
-            end
-        end
-    end
-
-    return acc
-end
-
-function _diag_vars_in_function(func; output_index::Union{Nothing,Int}=nothing)
-    acc = Set{String}()
-    _diag_collect_vars!(acc, func; output_index=output_index)
-    return collect(acc)
 end
 
 function _diag_constraint_object(c)
@@ -173,11 +163,22 @@ function diagnostic_constraints(m)
 end
 
 """
-Return equation-to-variable MCP matches.
+Return equation-to-variable MCP matches, one row per (constraint, complement
+variable) pair.
 
-For true MOI.Complements constraints, this uses variables appearing in component
-2 of the vector function.  This avoids the false result where every variable is
-reported as unmatched because the printed constraint text omitted `⟂`.
+For each `MOI.Complements` constraint, `JuMP.constraint_object(c).func` is a
+`Vector` of length `2k` of JuMP scalar expressions, positionally laid out as
+`[F_1,...,F_k, x_1,...,x_k]`: component `k+row` is the variable complementary
+to residual component `row` (k=1 for every constraint in this model — each is
+a plain scalar `F[idx] ⟂ x[idx]`). The complement variable is recovered by
+walking that expression's own JuMP fields (`_diag_scalar_vars`), and the
+residual is evaluated at the model's current JuMP start values
+(`_diag_eval_at_start`) and reported in `residual_at_start`.
+
+Falls back to text-based `⟂` parsing only for a constraint that is not itself
+an `MOI.Complements` set but whose printed form still contains `⟂` (a defence
+against a future JuMP/PATH representation change; not exercised by the
+current stack, where every `⟂` constraint is `MOI.Complements`-typed).
 """
 function diagnostic_equation_matches(m)
     lookup = _diag_var_lookup(m)
@@ -188,43 +189,59 @@ function diagnostic_equation_matches(m)
         for c in JuMP.all_constraints(m, F, S)
             cname = _diag_name(c)
             ctext = string(c)
-            is_comp = is_comp_type || occursin('⟂', ctext)
-            is_comp || continue
 
-            obj = _diag_constraint_object(c)
-            comp_ids = String[]
-            residual_ids = String[]
-            method = "text"
-
-            if obj !== nothing && hasproperty(obj, :func) && is_comp_type
-                func = getproperty(obj, :func)
-                comp_ids = _diag_vars_in_function(func; output_index=2)
-                residual_ids = _diag_vars_in_function(func; output_index=1)
-                method = "MOI component 2"
-            end
-
-            # Fallback for older Complementarity.jl printed forms.
-            comp_names_from_text = String[]
-            if isempty(comp_ids)
-                comp_names_from_text = _diag_complement_var_names_from_text(ctext)
-            end
-
-            if !isempty(comp_ids)
-                for vid in sort(comp_ids)
-                    vname = get(lookup, vid, vid)
-                    push!(rows, (
-                        constraint = cname,
-                        constraint_family = _diag_family_name(cname),
-                        complement_variable_index = vid,
-                        complement_variable = vname,
-                        complement_family = _diag_family_name(vname),
-                        residual_variable_count = length(residual_ids),
-                        extraction_method = method,
-                        text = ctext,
-                    ))
+            if is_comp_type
+                obj = _diag_constraint_object(c)
+                if obj === nothing || !hasproperty(obj, :func)
+                    continue
                 end
-            else
-                for vname in comp_names_from_text
+                func = obj.func
+                k = length(func) ÷ 2
+                for row in 1:k
+                    residual_expr = func[row]
+                    var_expr = func[k+row]
+                    vars = _diag_scalar_vars(var_expr)
+                    residual_val = _diag_eval_at_start(residual_expr)
+                    if length(vars) == 1
+                        v = vars[1]
+                        vid = string(JuMP.index(v))
+                        vname = get(lookup, vid, _diag_name(v))
+                        push!(rows, (
+                            constraint = cname,
+                            constraint_family = _diag_family_name(cname),
+                            complement_variable_index = vid,
+                            complement_variable = vname,
+                            complement_family = _diag_family_name(vname),
+                            residual_variable_count = length(vars),
+                            residual_at_start = residual_val,
+                            extraction_method = "func[$(k+row)] of $(length(func))",
+                            text = ctext,
+                        ))
+                    else
+                        # Anomalous: complement side is not a bare single variable.
+                        # Emit one row per variable found (0 rows if none) so
+                        # diagnostic_variables_without_equations still flags it.
+                        for v in vars
+                            vid = string(JuMP.index(v))
+                            vname = get(lookup, vid, _diag_name(v))
+                            push!(rows, (
+                                constraint = cname,
+                                constraint_family = _diag_family_name(cname),
+                                complement_variable_index = vid,
+                                complement_variable = vname,
+                                complement_family = _diag_family_name(vname),
+                                residual_variable_count = length(vars),
+                                residual_at_start = residual_val,
+                                extraction_method = "ANOMALY: $(length(vars)) vars in func[$(k+row)]",
+                                text = ctext,
+                            ))
+                        end
+                    end
+                end
+            elseif occursin('⟂', ctext)
+                # Defensive fallback for a non-Complements-typed but ⟂-printed
+                # constraint; not exercised by the current JuMP/PATH stack.
+                for vname in _diag_complement_var_names_from_text(ctext)
                     push!(rows, (
                         constraint = cname,
                         constraint_family = _diag_family_name(cname),
@@ -232,7 +249,8 @@ function diagnostic_equation_matches(m)
                         complement_variable = vname,
                         complement_family = _diag_family_name(vname),
                         residual_variable_count = 0,
-                        extraction_method = method,
+                        residual_at_start = NaN,
+                        extraction_method = "text",
                         text = ctext,
                     ))
                 end

@@ -13,7 +13,10 @@ using XLSX
 using Complementarity
 using PATHSolver
 using DataFrames
-PATHSolver.c_api_License_SetString("1259252040&Courtesy&&&USR&GEN2035&5_1_2026&1000&PATH&GEN&31_12_2035&0_0_0&6000&0_0")
+# PATH licence: use PATH_LICENSE_STRING from the environment if set, otherwise
+# fall back to the public courtesy licence (valid until 31 Dec 2035).
+PATHSolver.c_api_License_SetString(get(ENV, "PATH_LICENSE_STRING",
+    "1259252040&Courtesy&&&USR&GEN2035&5_1_2026&1000&PATH&GEN&31_12_2035&0_0_0&6000&0_0"))
 
 include("Types.jl")
 include("SAM.jl")

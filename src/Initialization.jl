@@ -179,13 +179,20 @@ function initialize_from_sam!(model, data::LinkageData)
         # XA = domestic Armington demand from SAM (excludes exports).
         xa0 = max(get(get(PAR, :XA0, Dict()), ii, x0 * 0.92), 1.0e-9)
         _safe_start_value!(model, :XA,  (ii,), xa0)
-        _safe_start_value!(model, :XDs, (ii,), max(0.90*x0, 1.0e-9))
+        # XDs/ES ≈ CET split of (XP - XMgr) from beta_xd/beta_es (calibrated from
+        # the SAM's domestic-vs-export commodity split; T-14/T-15 in Trade.jl).
+        # A hardcoded generic 0.90/0.05 split ignored the calibrated shares and
+        # was the dominant source of the T_14/T_15/T_16 residuals at start.
+        xmgr0 = x0 * 0.02
+        beta_xd_val = get(get(PAR, :beta_xd, Dict()), ii, 0.95)
+        beta_es_val = get(get(PAR, :beta_es, Dict()), ii, 0.05)
+        _safe_start_value!(model, :XDs, (ii,), max(beta_xd_val * (x0 - xmgr0), 1.0e-9))
         # XDd ≈ domestic share of XA from beta_d (calibrated).
         beta_d_val = get(get(PAR, :beta_d, Dict()), ii, 0.92)
         beta_m_val = get(get(PAR, :beta_m, Dict()), ii, 0.08)
         _safe_start_value!(model, :XDd, (ii,), max(beta_d_val * xa0, 1.0e-9))
         _safe_start_value!(model, :XMT, (ii,), max(beta_m_val * xa0, 1.0e-9))
-        _safe_start_value!(model, :ES,  (ii,), max(0.05*x0, 1.0e-9))
+        _safe_start_value!(model, :ES,  (ii,), max(beta_es_val * (x0 - xmgr0), 1.0e-9))
         _safe_start_value!(model, :ND,  (ii,), nd0)
         _safe_start_value!(model, :UVC, (ii,), 1.0)
         _safe_start_value!(model, :AC,  (ii,), 1.0)
@@ -362,14 +369,50 @@ function initialize_from_sam!(model, data::LinkageData)
     end
 
     # ── Bilateral trade ───────────────────────────────────────────────────────
-    for ii in i, rr in r, rrp in rp
-        for nm in [:PM,:PE,:WPE,:WPM,:WTFd,:WTFs,:WTFin,:WTFout,:WTFq,:TauPR]
-            _safe_start_value!(model, nm, (rr,rrp,ii), 1.0)
+    # All trade prices stay at the benchmark numeraire of 1.0 (tau_out/tau_in/
+    # zeta_t/lambda_w default to 0/0/0/1, so T-20/T-21/T-25 hold with no wedge;
+    # tau_m/tau_e are SAM-calibrated and generally nonzero, so T-6/T-8/T-10/
+    # T-22 retain a small residual from that tariff wedge -- see report).  With
+    # prices equal within every nest, each CES/CET share equation collapses to
+    # "quantity = share * upstream aggregate" (price-ratio terms = 1^elasticity
+    # = 1), so bilateral quantities must be built top-down from the already-set
+    # aggregate starts (XMT, ES) using the beta_1/beta_2/beta_w/beta_z shares --
+    # not left at a flat 1.0 regardless of XMT/ES's scale.  Previously this was
+    # the dominant source of the T-5..T-27 residuals at start (e.g. T_5[R1,P075]
+    # off by two orders of magnitude, per the Diagnostics residual audit).
+    for ii in i
+        xmt0 = max(start_value(model[:XMT][ii]), 1.0e-9)
+        es0  = max(start_value(model[:ES][ii]),  1.0e-9)
+
+        # T-5/T-7: XM1[rr,ii] = beta_1[(rr,ii)]*XMT[ii]; XM2[rr,ii] = beta_2[(rr,ii)]*XM1[rr,ii].
+        xm1 = Dict(rr => get(get(PAR, :beta_1, Dict()), (rr,ii), 1.0/length(r)) * xmt0 for rr in r)
+        xm2 = Dict(rr => get(get(PAR, :beta_2, Dict()), (rr,ii), 1.0/length(r)) * xm1[rr] for rr in r)
+        for rr in r
+            _safe_start_value!(model, :XM1, (rr,ii), xm1[rr])
+            _safe_start_value!(model, :PM1, (rr,ii), 1.0)
+            _safe_start_value!(model, :XM2, (rr,ii), xm2[rr])
+            _safe_start_value!(model, :PM2, (rr,ii), 1.0)
         end
-    end
-    for ii in i, rr in r
-        for nm in [:XM1,:PM1,:XM2,:PM2]
-            _safe_start_value!(model, nm, (rr,ii), 1.0)
+
+        for rr in r, rrp in rp
+            # T-9: WTFd[rr,rrp,ii] = beta_w[(rr,rrp,ii)]*XM2[rrp,ii] (source region rrp's pool).
+            wtfd_val = get(get(PAR, :beta_w, Dict()), (rr,rrp,ii), 1.0/length(r)) * xm2[rrp]
+            _safe_start_value!(model, :WTFd, (rr,rrp,ii), wtfd_val)
+            # T-11/T_WTFin/T-13: TRQ non-binding at benchmark -> WTFin=WTFq=WTFd, WTFout≈0.
+            _safe_start_value!(model, :WTFin,  (rr,rrp,ii), wtfd_val)
+            _safe_start_value!(model, :WTFq,   (rr,rrp,ii), wtfd_val)
+            _safe_start_value!(model, :WTFout, (rr,rrp,ii), 0.0)
+            # T-12: TauPR = tau_out - tau_in (both default to 0.0).
+            tauin  = get(get(PAR, :tau_in,  Dict()), (rr,rrp,ii), 0.0)
+            tauout = get(get(PAR, :tau_out, Dict()), (rr,rrp,ii), 0.0)
+            _safe_start_value!(model, :TauPR, (rr,rrp,ii), max(tauout - tauin, 0.0))
+            # T-18: WTFs[rr,rrp,ii] = beta_z[(rr,rrp,ii)]*ES[ii] (beta_z normalized
+            # over the full (rr,rrp) grid so it sums to 1 -- see ParameterTables.jl).
+            beta_z_val = get(get(PAR, :beta_z, Dict()), (rr,rrp,ii), 1.0/(length(r)*length(rp)))
+            _safe_start_value!(model, :WTFs, (rr,rrp,ii), beta_z_val * es0)
+            for nm in [:PM,:PE,:WPE,:WPM]
+                _safe_start_value!(model, nm, (rr,rrp,ii), 1.0)
+            end
         end
     end
 
@@ -382,7 +425,14 @@ function initialize_from_sam!(model, data::LinkageData)
     _safe_start_value!(model, :WPMg, (), 1.0)
 
     # ── Land market ───────────────────────────────────────────────────────────
-    _safe_start_value!(model, :TLnd,  (), max(sum(get(PAR[:TSupply], ii, 1.0) for ii in data.sets[:ag]), 1.0e-9))
+    # F-13 (Factors.jl) says TLnd = chi_T[:land] * (PTLnd/PABS)^eta_T, and
+    # chi_T[:land] is calibrated (Calibration.jl) as sum(TSupply) over ALL
+    # sectors i, not just :ag (TSupply is itself defined, floored at 1e-9, for
+    # every sector). Summing only over :ag here undercounted the non-ag floor
+    # contributions relative to chi_T's own calibration domain, producing a
+    # large F_13_unbounded_land residual at start; sum over the same domain
+    # chi_T was calibrated over.
+    _safe_start_value!(model, :TLnd,  (), max(sum(get(PAR[:TSupply], ii, 1.0) for ii in i), 1.0e-9))
     _safe_start_value!(model, :PTLnd, (), 1.0)
     for ii in i
         _safe_start_value!(model, :PT,  (ii,), 1.0)
