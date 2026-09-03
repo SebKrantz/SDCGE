@@ -1,0 +1,26 @@
+name = "EnvCGE"
+uuid = "209b675e-7808-4e25-9e33-9bb5f8896683"
+version = "0.1.0"
+
+[deps]
+CSV = "336ed68f-0bac-5ca0-87d4-7b16caf5d00b"
+DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
+JuMP = "4076af6c-e467-56ae-b986-b466b2749572"
+OrderedCollections = "bac558e1-5e72-5ebc-8fee-abe8a469f55d"
+PATHSolver = "f5f7c340-0bb3-5c69-969a-41884d311d1b"
+XLSX = "fdbf4ff8-1666-58a4-91e7-1b58723a45e0"
+
+[compat]
+CSV = "0.10"
+DataFrames = "1"
+JuMP = "1"
+OrderedCollections = "1, 2"
+PATHSolver = "1"
+XLSX = "0.10, 0.11, 0.12"
+julia = "1.10"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]

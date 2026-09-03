@@ -35,7 +35,6 @@ function closure_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
     inv_fd = _env_pick(s.fd, vcat(s.inv, ["inv", "INV", "investment", "Investment"]), _env_first(s.fd, "inv"))
     cap = _env_first(s.cap, "cap")
     rres = _env_pick(s.r, s.rres, _env_first(s.r, "rres"))
-    aa0 = _env_pick(s.aa, s.a, _env_first(s.i, ""))
 
     # Declare only ENVISAGE national-account and closure variable families.
     if !_env_hasvar(m, :QGDP);    @variable(m, QGDP[s.r,s.t,s.t]); end
@@ -94,7 +93,7 @@ function closure_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
     XWd = m[:XWd]
     PWE = m[:PWE]
     PWM = m[:PWM]
-    PD = m[:PD]
+    PDT = m[:PDT]
     PA = m[:PA]
     PAh = _env_hasvar(m, :PAh) ? m[:PAh] : nothing
     YGOV = m[:YGOV]
@@ -138,28 +137,24 @@ function closure_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
     # (M-1) GDP at market price.
     @NLconstraint(m, [r=s.r], GDPMP[r] == QGDP[r,t0,t0])
 
-    # (M-1a) QGDP indicator: value of absorption, trade and transport exports,
-    # and net trade at border prices, evaluated with prices of tp and quantities of tq.
+    # (M-1a) QGDP indicator: value of absorption, trade and transport margin
+    # output, and net trade at border prices, evaluated with prices of tp and
+    # quantities of tq.
     #
-    # Important: keep ordinary Julia conditionals outside JuMP nonlinear macros.
-    # JuMP cannot parse constructs such as `(isempty(aa0) ? ... : ...)` or
-    # `if isempty(...)` inside @NLconstraint/@NLexpression.
-    if isempty(aa0)
-        @NLconstraint(m, [r=s.r,tp=s.t,tq=s.t],
-            QGDP[r,tp,tq] ==
-                sum(PAh[r,i,fd] * XA[r,i,fd] for fd in fd_h, i in s.i)
-              + sum(PA[r,i,fd] * XA[r,i,fd] for fd in fd_nh, i in s.i)
-              + sum(sum(PWE[r,i,d] * XWs[r,i,d] for d in s.r) - sum(PWM[src,i,r] * XWd[src,i,r] for src in s.r) for i in s.i)
-        )
-    else
-        @NLconstraint(m, [r=s.r,tp=s.t,tq=s.t],
-            QGDP[r,tp,tq] ==
-                sum(PAh[r,i,fd] * XA[r,i,fd] for fd in fd_h, i in s.i)
-              + sum(PA[r,i,fd] * XA[r,i,fd] for fd in fd_nh, i in s.i)
-              + sum(PD[r,mm,aa0] * XTT[r,mm] for mm in s.i)
-              + sum(sum(PWE[r,i,d] * XWs[r,i,d] for d in s.r) - sum(PWM[src,i,r] * XWd[src,i,r] for src in s.r) for i in s.i)
-        )
-    end
+    # The trade-and-transport margin term is valued at PDT[r,mm], the same
+    # domestic price ENVISAGE T-32 already uses to value XTT (PTMG[mrg]*XTMG[mrg]
+    # == sum(PDT[r,mrg]*XTT[r,mrg] for r in s.r)).  An earlier version of this
+    # equation valued the margin at PD[r,mm,aa0] (an arbitrary single slice of
+    # the agent-specific Armington price, only defined under agent sourcing,
+    # ArmFlag != 0); PDT is defined unconditionally, so this also removes a
+    # spurious dependency on the ArmFlag-only PD family and the aa0 lookup.
+    @NLconstraint(m, [r=s.r,tp=s.t,tq=s.t],
+        QGDP[r,tp,tq] ==
+            sum(PAh[r,i,fd] * XA[r,i,fd] for fd in fd_h, i in s.i)
+          + sum(PA[r,i,fd] * XA[r,i,fd] for fd in fd_nh, i in s.i)
+          + sum(PDT[r,mm] * XTT[r,mm] for mm in s.i)
+          + sum(sum(PWE[r,i,d] * XWs[r,i,d] for d in s.r) - sum(PWM[src,i,r] * XWd[src,i,r] for src in s.r) for i in s.i)
+    )
 
     # (M-2) GDP at market price deflator, Fisher price index.
     @NLconstraint(m, [r=s.r], PGDPMP[r] == 1.0)
@@ -188,7 +183,15 @@ function closure_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
     @NLconstraint(m, [r=s.r], RSg[r] * RSG_deflator[r] == Sg[r])
 
     # (M-9) Balance-of-payments closure: fixed capital account case.
-    @NLconstraint(m, [r=s.r], Sf[r] == Sf[r])
+    # This closure alternative is not active in this configuration: Sf is
+    # instead determined by M-14 (regional share-of-GDP rule for non-residual
+    # regions) plus M-10 (global balance, which pins the residual region).  The
+    # equation was previously coded as the tautology `Sf[r] == Sf[r]`, a
+    # placeholder that is trivially satisfied for any Sf and provides no real
+    # determination (and a singular row for PATH); it is removed rather than
+    # kept as dead weight.  If this closure regime is selected in the future,
+    # M-9 should instead read `Sf[r] == Sf0[r]` (fix Sf at its calibrated
+    # value) and M-14 should be skipped, since both cannot determine Sf at once.
 
     # (M-10) Global foreign saving balance.
     @NLconstraint(m, sum(Sf[r] for r in s.r) == 0)
@@ -206,11 +209,15 @@ function closure_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
     )
 
     # (M-14) Foreign saving fixed relative to GDP, residual-region case.
+    # The residual region (r == rres) is deliberately left without its own
+    # per-region equation here: Sf[rres] is the closing variable determined by
+    # the global balance M-10 (sum(Sf) == 0) once the non-residual regions are
+    # pinned below.  A per-region placeholder `Sf[rres] == Sf[rres]` was
+    # previously written for that case; like M-9, it is a tautology (always
+    # true, no information, singular row for PATH) and is removed rather than
+    # counted as a real equation.
     for r in s.r
-        if r == rres
-            # (M-14) Residual region: foreign saving is the residual under capRFix.
-            @NLconstraint(m, Sf[r] == Sf[r])
-        else
+        if r != rres
             # (M-14) Non-residual regions: foreign saving as a share of GDP.
             @NLconstraint(m, Sf[r] == chi_sf * GDPMP[r] / PWsav)
         end
@@ -252,7 +259,9 @@ function closure_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
     @NLconstraint(m, [r=s.r], XFD[r,inv_fd] == TKs[r] * (grK[r] + delta))
 
     # (M-25) Global savings/investment balance.
-    @NLconstraint(m, sum(Sf[r] for r in s.r) == 0)
+    # This is a literal duplicate of M-10 (sum(Sf[r] for r in s.r) == 0), which
+    # is already declared above; it is not re-declared here to avoid pairing
+    # two equations with the same (already-satisfied) global constraint.
 
     # (M-26) Model numeraire.
     @NLconstraint(m, PNUM == 1)

@@ -295,7 +295,7 @@ function _ps_first_line(x)
     return isempty(lines) ? "" : first(lines)
 end
 
-function _ps_write_csv(path::AbstractString, header::Vector{String}, rows::Vector{Vector})
+function _ps_write_csv(path::AbstractString, header::Vector{String}, rows::AbstractVector)
     open(path, "w") do io
         println(io, join(header, ","))
         for row in rows
@@ -432,9 +432,9 @@ end
 function _ps_snapshot(m::JuMP.Model)
     vc = _ps_var_family_counts(m)
     cc, ncon = _ps_constraint_family_counts(m)
-    nvar = sum(row["total"] for row in values(vc))
-    nfixed = sum(row["fixed"] for row in values(vc))
-    nfree = sum(row["free"] for row in values(vc))
+    nvar = sum(row["total"] for row in values(vc); init=0)
+    nfixed = sum(row["fixed"] for row in values(vc); init=0)
+    nfree = sum(row["free"] for row in values(vc); init=0)
     return Dict{String,Any}(
         "variable_count_total"=>nvar,
         "variable_count_fixed"=>nfixed,

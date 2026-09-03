@@ -230,7 +230,7 @@ function run_recursive_dynamic!(model::EnvModel, state::Dict)
     tprev = isempty(tset) ? "t" : first(tset)
     for tnext in tset
         solve!(model)
-        dynamics_update!(state, model.data, model.calib, tprev, tnext, parameters(model.data, model.calib))
+        dynamics_update!(state, model.data, model.calib, tprev, tnext)
         tprev = tnext
     end
     return state

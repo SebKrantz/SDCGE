@@ -52,19 +52,22 @@ function trade_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
     ni = max(length(s.i), 1)
     naa = max(length(s.aa), 1)
 
+    # ArmFlag is the document's top-level sourcing control: 0 => national sourcing,
+    # nonzero => agent sourcing. No additional trade-regime switch is used.
+    ArmFlag = Int(get(data.par, "ArmFlag", 0))
+
     # Declare ENVISAGE trade variable families using standard JuMP syntax.
-    # No guarded object-dictionary declarations and no non-document switch
-    # variables are used in this block.
+    # PD, PM and PDMa are the agent-specific domestic/import prices used only by
+    # the agent-sourcing equations T-6:T-10 and T-15:T-18 (ArmFlag != 0 branch
+    # below); guard their declaration on ArmFlag so they are not left as
+    # thousands of undetermined instances under the national-sourcing default.
     @variables(m, begin
         XAT[s.r, s.i] >= 0
         XDTd[s.r, s.i] >= 0
         XDTs[s.r, s.i] >= 0
         XMT[s.r, s.i] >= 0
         PAT[s.r, s.i] >= 0
-        PD[s.r, s.i, s.aa] >= 0
-        PM[s.r, s.i, s.aa] >= 0
         PDM[s.r, s.i, s.r] >= 0
-        PDMa[s.r, s.i, s.r, s.aa] >= 0
         XWd[s.r, s.i, s.r] >= 0
         XET[s.r, s.i] >= 0
         PET[s.r, s.i] >= 0
@@ -76,6 +79,13 @@ function trade_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
         PTMG[s.i] >= 0
         XTT[s.r, s.i] >= 0
     end)
+    if ArmFlag != 0
+        @variables(m, begin
+            PD[s.r, s.i, s.aa] >= 0
+            PM[s.r, s.i, s.aa] >= 0
+            PDMa[s.r, s.i, s.r, s.aa] >= 0
+        end)
+    end
 
     # These variables are declared in earlier blocks and are used here by
     # the trade equations exactly as named in the ENVISAGE document.
@@ -85,17 +95,16 @@ function trade_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
     PS = m[:PS]
     PDT = m[:PDT]
     PMT = m[:PMT]
-    XD = m[:XD]
-    XM = m[:XM]
-    XWa = m[:XWa]
-    PMa = m[:PMa]
     XWs = m[:XWs]
     PE = m[:PE]
     PWM = m[:PWM]
-
-    # ArmFlag is the document's top-level sourcing control: 0 => national sourcing,
-    # nonzero => agent sourcing. No additional trade-regime switch is used.
-    ArmFlag = Int(get(data.par, "ArmFlag", 0))
+    XD  = ArmFlag != 0 ? m[:XD]  : nothing
+    XM  = ArmFlag != 0 ? m[:XM]  : nothing
+    XWa = haskey(JuMP.object_dictionary(m), :XWa) ? m[:XWa] : nothing
+    PMa = ArmFlag != 0 ? m[:PMa] : nothing
+    PD  = ArmFlag != 0 ? m[:PD]   : nothing
+    PM  = ArmFlag != 0 ? m[:PM]   : nothing
+    PDMa = ArmFlag != 0 ? m[:PDMa] : nothing
 
     σmt = sigma_mt
     σm  = sigma_m

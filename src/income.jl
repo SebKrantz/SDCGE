@@ -72,22 +72,39 @@ function income_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
     XA  = m[:XA]
     PA  = m[:PA]
 
+    # Conditional switches in the paper.  Computed here (rather than further
+    # below) because they also gate which agent-sourcing/MRIO trade variable
+    # families need to be pre-declared immediately below.
+    ArmFlag = Int(get(data.par, "ArmFlag", 0))          # Y-14 and Y-18
+    ifMRIO  = Bool(get(data.par, "ifMRIO", false))      # Y-2 and Y-15
+    need_agent_sourcing = ArmFlag != 0
+    need_XWa = ArmFlag != 0 || ifMRIO
+
     # Trade variables are declared after income in the build order.  To keep the
     # Y-block equations in document form without inventing substitutes, create the
     # document variable families here only if they are not already present.
+    # XD, XM, PMa and XWa are only referenced by the agent-sourcing (ArmFlag != 0)
+    # / MRIO branches of trade.jl and income.jl (T-6:T-18, Y-2/Y-14/Y-15/Y-18
+    # ifMRIO/else cases); guarding their declaration on the same condition that
+    # gates the equations using them avoids declaring thousands of instances
+    # that would otherwise never appear in any constraint under the
+    # national-sourcing default (ArmFlag == 0, ifMRIO == false).
     if !haskey(JuMP.object_dictionary(m), :PWM); @variable(m, PWM[s.r,s.i,s.r] >= 0); end
     if !haskey(JuMP.object_dictionary(m), :XWs); @variable(m, XWs[s.r,s.i,s.r] >= 0); end
-    if !haskey(JuMP.object_dictionary(m), :XWa); @variable(m, XWa[s.r,s.i,s.r,s.aa] >= 0); end
+    if need_XWa && !haskey(JuMP.object_dictionary(m), :XWa); @variable(m, XWa[s.r,s.i,s.r,s.aa] >= 0); end
     if !haskey(JuMP.object_dictionary(m), :PMT); @variable(m, PMT[s.r,s.i] >= 0); end
-    if !haskey(JuMP.object_dictionary(m), :PMa); @variable(m, PMa[s.r,s.i,s.aa] >= 0); end
+    if need_agent_sourcing && !haskey(JuMP.object_dictionary(m), :PMa); @variable(m, PMa[s.r,s.i,s.aa] >= 0); end
     if !haskey(JuMP.object_dictionary(m), :PDT); @variable(m, PDT[s.r,s.i] >= 0); end
-    if !haskey(JuMP.object_dictionary(m), :XD);  @variable(m, XD[s.r,s.i,s.aa] >= 0); end
-    if !haskey(JuMP.object_dictionary(m), :XM);  @variable(m, XM[s.r,s.i,s.aa] >= 0); end
+    if need_agent_sourcing && !haskey(JuMP.object_dictionary(m), :XD);  @variable(m, XD[s.r,s.i,s.aa] >= 0); end
+    if need_agent_sourcing && !haskey(JuMP.object_dictionary(m), :XM);  @variable(m, XM[s.r,s.i,s.aa] >= 0); end
     if !haskey(JuMP.object_dictionary(m), :PE);  @variable(m, PE[s.r,s.i,s.r] >= 0); end
 
-    PWM = m[:PWM]; XWs = m[:XWs]; XWa = m[:XWa]
-    PMT = m[:PMT]; PMa = m[:PMa]; PDT = m[:PDT]
-    XD = m[:XD]; XM = m[:XM]; PE = m[:PE]
+    PWM = m[:PWM]; XWs = m[:XWs]
+    PMT = m[:PMT]; PDT = m[:PDT]; PE = m[:PE]
+    XWa = need_XWa ? m[:XWa] : nothing
+    PMa = need_agent_sourcing ? m[:PMa] : nothing
+    XD  = need_agent_sourcing ? m[:XD]  : nothing
+    XM  = need_agent_sourcing ? m[:XM]  : nothing
 
     # GDPMP is the documented macro variable used by Y-7. It may be declared in
     # closure.jl; declare once here if income is built first.
@@ -129,9 +146,8 @@ function income_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
     φEmi  = phi_Emi
     τEmi  = tau_Emi
 
-    # Conditional switches in the paper.
-    ArmFlag = Int(get(data.par, "ArmFlag", 0))          # Y-14 and Y-18
-    ifMRIO  = Bool(get(data.par, "ifMRIO", false))      # Y-2 and Y-15
+    # ArmFlag/ifMRIO are computed earlier in this function (they also gate the
+    # guarded trade-variable pre-declarations above).
 
     # Document revenue-index subsets. wtx is in Y-17; skip if aggregation omits it.
     wtx = [gy for gy in s.gy if lowercase(gy) == "wtx"]

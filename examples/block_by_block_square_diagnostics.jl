@@ -4,7 +4,7 @@
 #   julia --project=. examples/block_by_block_square_diagnostics.jl data/example_envcge_data.xlsx reports/path_square_blocks
 
 include(joinpath(@__DIR__, "_example_preamble.jl"))
-using .EnvCGE
+using EnvCGE
 
 xlsx = length(ARGS) >= 1 ? example_path(ARGS[1]) : default_excel_path()
 outdir = length(ARGS) >= 2 ? example_path(ARGS[2]) : joinpath(ENV_CGE_PROJECT_ROOT, "reports", "path_square_blocks")

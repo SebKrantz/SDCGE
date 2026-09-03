@@ -43,6 +43,24 @@ function equation_variable_map(data::EnvData)
     trade_vars = ["XAT","XDTd","XMT","PAT","PA","XD","XM","PA","PD","PM","XDTd","XMT","XWd","PMT","XWa","PMa","PDMa","XWd","XDTs","XET","PS","XWs","PET","PWE","PWM","PDM","XWMG","XMG","PWMG","XTMG","XTT","PTMG"]
     for (k, v) in enumerate(trade_vars); m["T-$k"] = v; end
 
+    # T-6:T-10 and T-15:T-18 are the ENVISAGE agent-sourcing/MRIO equations
+    # (trade.jl's ArmFlag != 0 branch). trade.jl/income.jl only declare XD, XM,
+    # PD, PM, PMa, PDMa (and, unless ifMRIO, XWa) when that branch is actually
+    # built. Since T-2/T-11 and T-3/T-12 already reuse the same variable across
+    # both sourcing regimes in this table, extend that precedent here rather
+    # than pointing these labels at variables that do not exist under the
+    # active national-sourcing closure: reuse each inactive equation's national-
+    # sourcing counterpart so the mapping always names a variable the current
+    # build actually declares.
+    inactive = _inactive_closure_families(data)
+    if "XD" in inactive;   m["T-6"]  = "XDTd"; end
+    if "XM" in inactive;   m["T-7"]  = "XMT";  end
+    if "PD" in inactive;   m["T-9"]  = "PDT";  end
+    if "PM" in inactive;   m["T-10"] = "PMT";  end
+    if "XWa" in inactive;  m["T-15"] = "XWd";  end
+    if "PMa" in inactive;  m["T-16"] = "PMT";  end
+    if "PDMa" in inactive; m["T-17"] = "PDM";  end
+
     m["E-1"] = "XDTd"
     m["E-2"] = "XWd"
 
@@ -72,6 +90,32 @@ function equation_variable_map(data::EnvData)
     for (k, v) in enumerate(emission_vars); m["EM-$k"] = v; end
 
     return m
+end
+
+"""
+Variable families that ENVISAGE's trade/income blocks only declare and use
+under agent sourcing (ArmFlag != 0, trade.jl T-6:T-12/T-15:T-18 and the
+corresponding income.jl Y-14/Y-15/Y-18 branches) or MRIO (ifMRIO, income.jl
+Y-2/Y-15).  `equation_variable_map` lists a fixed T-1:T-32 label set covering
+both the national-sourcing and agent-sourcing document cases, but only one
+branch is ever built into the JuMP model for a given closure.  Under the
+inactive branch these families are legitimately undeclared (income.jl/trade.jl
+guard their declaration on the same ArmFlag/ifMRIO condition), not a mapping
+bug, so `path_mapping_report` excludes them from `undeclared_mapped_variable_families`
+when the active closure does not need them.
+"""
+const _ARMFLAG_ONLY_FAMILIES = Set(["XD", "XM", "PD", "PM", "PMa", "PDMa"])
+const _MRIO_OR_ARMFLAG_FAMILIES = Set(["XWa"])
+
+function _inactive_closure_families(data::EnvData)
+    ArmFlag = Int(get(data.par, "ArmFlag", 0))
+    ifMRIO  = Bool(get(data.par, "ifMRIO", false))
+    inactive = Set{String}()
+    if ArmFlag == 0
+        union!(inactive, _ARMFLAG_ONLY_FAMILIES)
+        ifMRIO || union!(inactive, _MRIO_OR_ARMFLAG_FAMILIES)
+    end
+    return inactive
 end
 
 function _declared_variable_bases(jm::JuMP.Model)
@@ -114,7 +158,8 @@ function path_mapping_report(em::EnvModel)
     mapped_vars = Set(values(mapping))
     missing_mapping = setdiff(Set(keys(registry)), Set(keys(mapping)))
     extra_mapping = setdiff(Set(keys(mapping)), Set(keys(registry)))
-    undeclared_vars = setdiff(mapped_vars, union(declared, exogenous_hooks))
+    inactive_families = _inactive_closure_families(em.data)
+    undeclared_vars = setdiff(mapped_vars, union(declared, exogenous_hooks, inactive_families))
     nvar = em.jump === nothing ? 0 : JuMP.num_variables(em.jump)
     ncon = em.jump === nothing ? 0 : _path_nonbound_constraint_count(em.jump)
     return Dict{String,Any}(

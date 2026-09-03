@@ -50,13 +50,18 @@ function supply_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
         XS[s.r,s.i] >= 0             # XS_{r,i}: aggregate supplied commodity
         PS[s.r,s.i] >= 0             # PS_{r,i}: aggregate supplied price
 
-        # Electricity variables from S-6:S-14.
-        XPOW[s.r,s.i] >= 0           # XPOW_{r,ely}: aggregate power bundle demand
-        PPOW[s.r,s.i] >= 0           # PPOW_{r,ely}: average power-bundle price
-        XPB[s.r,s.pb,s.i] >= 0       # XPB_{r,pb,ely}: power bundle demand
-        PPOWN[s.r,s.i] >= 0          # PPOWN_{r,ely}: adjusted-CES power price index
-        PPB[s.r,s.pb,s.i] >= 0       # PPB_{r,pb,ely}: average price of power bundle pb
-        PPBN[s.r,s.pb,s.i] >= 0      # PPBN_{r,pb,ely}: adjusted-CES price index for pb
+        # Electricity variables from S-6:S-14.  Declared over s.ely (the
+        # electricity-commodity subset of s.i), matching the domain already
+        # documented for these families in mcp.jl (`_mcp_domain_for_variable`:
+        # "r × ely" / "r × pb × ely").  S-7:S-14 are only ever generated for
+        # `e in ely`, so declaring these over the full s.i commodity domain
+        # left the non-electricity slices permanently undetermined.
+        XPOW[s.r,ely] >= 0           # XPOW_{r,ely}: aggregate power bundle demand
+        PPOW[s.r,ely] >= 0           # PPOW_{r,ely}: average power-bundle price
+        XPB[s.r,s.pb,ely] >= 0       # XPB_{r,pb,ely}: power bundle demand
+        PPOWN[s.r,ely] >= 0          # PPOWN_{r,ely}: adjusted-CES power price index
+        PPB[s.r,s.pb,ely] >= 0       # PPB_{r,pb,ely}: average price of power bundle pb
+        PPBN[s.r,s.pb,ely] >= 0      # PPBN_{r,pb,ely}: adjusted-CES price index for pb
     end)
 
     XP = m[:XP]

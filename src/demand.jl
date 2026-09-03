@@ -286,10 +286,14 @@ function demand_block!(m::JuMP.Model, data::EnvData, cal::EnvCalibration)
         )
     end
 
+    # (D-36) Household nominal final demand expenditure is not declared as a
+    # separate equation: s.h is a subset of s.fd (households are one of the
+    # final-demand agents), so `YFD[r,h] == PFD[r,h]*XFD[r,h]` for h in s.h is a
+    # literal duplicate of D-37 below restricted to fd in s.h.  Declaring both
+    # would pair two identical equations with the same YFD[r,h] instances.
     @NLconstraints(m, begin
-        # (D-36) Household nominal final demand expenditure.
-        [r=s.r,h=s.h], YFD[r,h] == PFD[r,h] * XFD[r,h]
-        # (D-37) Nominal/real final demand identity.
+        # (D-37) Nominal/real final demand identity (covers households as well
+        # as government and investment, since s.h ⊆ s.fd).
         [r=s.r,fd=s.fd], YFD[r,fd] == PFD[r,fd] * XFD[r,fd]
     end)
     return m
