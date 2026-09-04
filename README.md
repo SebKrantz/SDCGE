@@ -245,16 +245,26 @@ equations need, are documented in the header of `Calibration.jl`:
 
 ## Known limitations
 
-- **Labour closure.** The wage `W` is fixed at 1 (F-12) and labour supply is
-  not binding: F-10 lets unemployment `UE` absorb any gap between supply and
-  demand, and F-4, F-6, F-7 and F-11 are circular/degenerate
-  (`TW = WMIN = AVGW`, `(TW−WMIN)·UE = 0`), so once `UE` leaves its bound
-  PATH loses its footing. Consequences: `g_labor` in the dynamic runs raises
+- **Labour closure.** The default regime (`parameters(data)[:labour_closure]
+  = :fixed_wage`) fixes the wage `W` at 1 and lets unemployment `UE` absorb
+  any gap between labour supply and demand (F-10); F-4, F-6, F-7 and F-11 are
+  circular/degenerate in this regime, so once `UE` leaves its bound PATH
+  loses its footing. Consequences: `g_labor` in the dynamic runs raises
   unemployment instead of output, and 7 of 10 periods of the default
   10-period run end in `ITERATION_LIMIT` (non-converged periods do not update
   the state, so the path plateaus; a warning is printed). TFP growth alone
-  solves every period. The fix is a real labour-market closure
-  (market-clearing wage, or a wage curve) in `Factors.jl`.
+  solves every period.
+  A market-clearing alternative is implemented and selectable
+  (`PAR[:labour_closure] = :full_employment`, with `PAR[:numeraire] ∈
+  {:pabs (default), :cpi}`): F-6 becomes labour-market clearing ⟂ `TW`,
+  `UE` is fixed at its benchmark, `NW = φ·TW`, `W = (1+τ_l)·NW`, F-21 becomes
+  capital-market clearing ⟂ `TR` (in the default regime `TR` has no
+  determining equation — F-21 collapses to `TR = TR`, hidden because the
+  benchmark start is already the solution). It is square and replicates the
+  benchmark to 0.004 %, **but PATH stalls (`SLOW_PROGRESS`)** because the
+  vintage block is rigid: F-24 pins `RR = 1`, so old-vintage output cannot
+  adjust to a wage change. That is the next thing to fix before switching
+  the default; see the `Factors.jl` header.
 - **Vintages carry no technology**: `Calibration.jl` gives Old and New capital
   identical shares and prices, so the dynamic update keeps the benchmark
   Old/New split (`vintage_rule=:benchmark_shares`); the flow-based split

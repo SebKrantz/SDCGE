@@ -29,6 +29,15 @@ function _safe_start_value_raw!(model, name::Symbol, index_tuple::Tuple, value)
     return nothing
 end
 
+# Lower bound substituted for a zero lower bound, and the offset used when a
+# start value would otherwise sit on that bound.  Equations that sum thousands of
+# structurally-zero quantities (C-3 over ~10^4 XAp cells, Y-3, Y-4, T-1, F-25)
+# inherit `count · eps` as their start residual, which is why the max start
+# residual is ~8.6e-6 rather than ~1e-10.  Tightening this to 1e-10 was tried:
+# it cuts the max start residual to 5.5e-7 but makes the DEFAULT (fixed-wage)
+# benchmark drift worse (max |pct change| 2.7e-4 % -> 0.23 %, because the
+# near-singular wage direction is excited differently), and it does not fix the
+# full-employment stall.  Kept at 1e-8.
 const LCGE_START_EPS = 1.0e-8
 # Start value for variables the benchmark forces to exactly zero: the smallest
 # value that still passes `check_initialization!` (start strictly above the
@@ -113,6 +122,10 @@ function enforce_nlp_safe_bounds_and_starts!(model; eps::Float64=LCGE_START_EPS)
     end
 
     # RR is a utilisation ratio in (0, 1]. F_24 forces RR = 1 at the benchmark.
+    # (Dropping the redundant upper bound was tried as a fix for the
+    # full-employment stall — F_24 `1 - RR ⟂ RR` has bound and equation active
+    # together — and made no measurable difference; the bound is kept because it
+    # is economically meaningful.)
     if haskey(model, :RR)
         RR = model[:RR]
         try
@@ -192,6 +205,22 @@ function initialize_from_sam!(model, data::LinkageData)
 
     nr = length(r)
 
+    # ── Labour-market closure (see the header of Factors.jl) ─────────────────
+    # Under :full_employment F-6 forces sum_i LV[l,i] = LS[l,"national"]·(1-UE0),
+    # so labour demand tracks labour SUPPLY and the LV/ULD/SLD/LY starts have to
+    # be rescaled to it whenever LS0 has been grown by the dynamic drivers.
+    # The scale is exactly 1 at the benchmark (LV0 sums to LSupply, UE0 = 0), so
+    # the benchmark start point is unchanged.  Under :fixed_wage labour demand is
+    # unconstrained and the starts stay at the last realised demand.
+    full_employment = get(PAR, :labour_closure, :full_employment) === :full_employment
+    ue0    = get(PAR, :UE0, Dict{Any,Float64}())
+    lscale = Dict{Any,Float64}()
+    for ll in l
+        ld = sum(get(PAR[:LV0], (ll,ii), 0.0) for ii in i)
+        ls = get(PAR[:LS0], (ll,"national"), ld) * (1 - get(ue0, ll, 0.0))
+        lscale[ll] = (full_employment && ld > 1.0e-9 && ls > 0.0) ? ls/ld : 1.0
+    end
+
     # ── Prices at the benchmark normalisation ────────────────────────────────
     # Unit prices everywhere except the tax wedges PX = 1/(1+tau_p) and
     # PND = PEp = Pfert = Pfeed = PAp = 1 + tau_Ap (see Calibration.jl header).
@@ -223,8 +252,8 @@ function initialize_from_sam!(model, data::LinkageData)
         _safe_start_value!(model, :Nfirm,(ii,), 1.0)
         # P-8: PROFIT = XP·(PX - AC) = 0 at the competitive benchmark.
         _safe_start_value!(model, :PROFIT, (ii,), 0.0)
-        _safe_start_value!(model, :ULD,  (ii,), B[:ULD][ii])
-        _safe_start_value!(model, :SLD,  (ii,), B[:SLD][ii])
+        _safe_start_value!(model, :ULD,  (ii,), B[:ULD][ii] * get(lscale, "UnSkLab", 1.0))
+        _safe_start_value!(model, :SLD,  (ii,), B[:SLD][ii] * get(lscale, "SkLab",   1.0))
         _safe_start_value!(model, :fert, (ii,), B[:fert][ii])
         _safe_start_value!(model, :feed, (ii,), B[:feed][ii])
         # Factor quantities are read from the live PAR supply tables rather than
@@ -265,7 +294,8 @@ function initialize_from_sam!(model, data::LinkageData)
         # P-72/P-74: with one labour type per bundle, LV = ULD / SLD.
         for ll in l
             _safe_start_value!(model, :LF_d, (ll,ii), 0.0)
-            _safe_start_value!(model, :LV,   (ll,ii), get(PAR[:LV0], (ll,ii), 1.0))
+            _safe_start_value!(model, :LV,   (ll,ii),
+                get(PAR[:LV0], (ll,ii), 1.0) * get(lscale, ll, 1.0))
             _safe_start_value!(model, :W,    (ll,ii), 1.0)
             _safe_start_value!(model, :NW,   (ll,ii), 1.0)
         end
@@ -308,7 +338,7 @@ function initialize_from_sam!(model, data::LinkageData)
     # Identical at the benchmark (LV0 sums to LSupply there), but in a dynamic
     # period labour supply has been grown while demand has not.
     for ll in l
-        ld = sum(get(PAR[:LV0], (ll,ii), 0.0) for ii in i)
+        ld = sum(get(PAR[:LV0], (ll,ii), 0.0) for ii in i) * get(lscale, ll, 1.0)
         _safe_start_value!(model, :LY, (ll,), ld > 0 ? ld : B[:LY][ll])
     end
 
@@ -336,16 +366,25 @@ function initialize_from_sam!(model, data::LinkageData)
     # otherwise forces PATH through a basis change it handles badly.
     for ll in l
         _safe_start_value_raw!(model, :MIGR, (ll,), 0.0)
-        ls_nat = max(get(PAR[:LS0], (ll,"national"), 1.0), 1.0e-9)
-        ld_nat = sum(get(PAR[:LV0], (ll,ii), 0.0) for ii in i)
-        ue_nat = clamp(1.0 - ld_nat/ls_nat, LCGE_UE_START, LCGE_UE_MAX)
+        if full_employment
+            # F-10 fixes UE at its benchmark rate in this regime.
+            ue_nat = max(get(ue0, ll, 0.0), LCGE_ZERO_START)
+            ue_gs  = ue_nat
+        else
+            # F-10 makes UE absorb supply minus demand; start it there so it is
+            # not pinned to its lower bound when LS0 has been grown.
+            ls_nat = max(get(PAR[:LS0], (ll,"national"), 1.0), 1.0e-9)
+            ld_nat = sum(get(PAR[:LV0], (ll,ii), 0.0) for ii in i)
+            ue_nat = clamp(1.0 - ld_nat/ls_nat, LCGE_UE_START, LCGE_UE_MAX)
+            ue_gs  = LCGE_UE_START
+        end
         for gg in gz
             _safe_start_value!(model, :LS,   (ll,gg), get(PAR[:LS0], (ll,gg), 1.0))
             _safe_start_value!(model, :AVGW, (ll,gg), 1.0)
             _safe_start_value!(model, :TW,   (ll,gg), 1.0)
             _safe_start_value!(model, :WMIN, (ll,gg), 1.0)
             _safe_start_value_raw!(model, :UE, (ll,gg),
-                gg == "national" ? ue_nat : LCGE_UE_START)
+                gg == "national" ? ue_nat : ue_gs)
         end
     end
 

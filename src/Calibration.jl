@@ -367,6 +367,10 @@ function calibrate_from_sam!(data::LinkageData)
         par[:LV0][("UnSkLab", p)] = uld[p]
         par[:LV0][("SkLab",   p)] = sld[p]
     end
+    # Benchmark unemployment: the SAM records labour payments, not an
+    # unemployment rate, so full employment (UE0 = 0) is the only rate
+    # consistent with it -- labour demand equals labour supply by construction.
+    par[:UE0] = Dict{Any,Float64}(ll => 0.0 for ll in l)
     par[:LS0] = Dict{Any,Float64}()
     for ll in l
         par[:LS0][(ll,"rural")]    = par[:LSupply][ll]/2

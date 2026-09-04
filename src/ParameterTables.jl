@@ -146,6 +146,21 @@ function precompute_parameters(data::LinkageData)
     # Factor market and dynamic parameters used by the complete paper-numbered equations.
     _fill!(PAR, :g_l, [(ll,gg) for ll in l for gg in S[:gz]], 0.0)
     _fill!(PAR, :LS0, [(ll,gg) for ll in l for gg in S[:gz]], 1000.0)
+    # Labour-market closure (see the header of Factors.jl):
+    #   :fixed_wage      — W = 1 and UE absorbs supply minus demand   (default)
+    #   :full_employment — the wage TW clears sum_i LV = LS·(1-UE0)
+    # :full_employment is implemented and square but does NOT converge yet
+    # (PATH: SLOW_PROGRESS after ~440 major iterations of backtracking steps,
+    # benchmark drift ~0.005-0.009 %); :fixed_wage stays the default because it
+    # replicates the benchmark and solves in ~1 s.  See the Factors.jl header
+    # and the hand-over notes for the remaining diagnosis.
+    PAR[:labour_closure] = :fixed_wage
+    # Numeraire under :full_employment (ignored under :fixed_wage, where W = 1):
+    #   :pabs — PABS = 1 (default; benchmark drift 0.004 %)
+    #   :cpi  — CPI[first(r)] = 1, PABS endogenous   (benchmark drift 0.60 %)
+    # Both give the same start residual; :pabs is the more stable of the two.
+    PAR[:numeraire] = :pabs
+    _fill!(PAR, :UE0, l, 0.0)          # benchmark unemployment rate per skill
     _fill!(PAR, :chi_migr, l, 0.0)
     _fill!(PAR, :omega_migr, l, 0.5)
     _fill!(PAR, :phi_wage, [(ll,ii) for ll in l for ii in i], 1.0)
